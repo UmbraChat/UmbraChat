@@ -6,7 +6,7 @@ UmbraChat is an open-source, self-hostable end-to-end encrypted messenger (Signa
 
 ## Why it exists
 
-Built to give a privacy-first alternative that resists mandated client-side content scanning (EU "ChatControl"-style regulation): no party, including the server operator, can access plaintext content. Solo-maintained, $0/month hosting, community-scale (under 1,000 users at launch).
+Built to give a privacy-first alternative that resists mandated client-side content scanning (EU "ChatControl"-style regulation): no party, including the server operator, can access plaintext content. Solo-maintained and distributed as software to self-host: the maintainer runs no public instance, and each instance is independent (no federation).
 
 ## Domain language
 
@@ -15,7 +15,6 @@ Built to give a privacy-first alternative that resists mandated client-side cont
 | Zero-knowledge server | The server stores and relays only encrypted envelopes and public prekey bundles; it never holds the keys to decrypt content |
 | Prekey bundle | The public key material a client publishes so others can start an encrypted session with it (X3DH) |
 | Envelope | An encrypted message/call-signaling payload as seen by the server; opaque without the recipient's private key |
-| Federation-shaped | The v1 schema (global user IDs, routing kept separate from storage) is designed so real federation can be added in v2 without a rewrite, even though v1 runs a single server |
 | Sideload | Installing the iOS/Android app outside an app store (AltStore/SideStore on iOS with a free Apple ID, direct APK on Android) — the $0-cost distribution path |
 
 ## Key features

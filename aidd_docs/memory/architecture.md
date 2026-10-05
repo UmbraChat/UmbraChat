@@ -25,7 +25,7 @@ graph TB
         DB[(PostgreSQL - encrypted envelopes only)]
     end
 
-    STUN[Self-hosted STUN server]
+    STUN[coturn: optional relay and STUN]
 
     Clients -->|E2E encrypted envelopes over WSS| API
     API --> Routing --> DB
@@ -36,11 +36,11 @@ graph TB
 ## Key decisions
 
 - The server stays zero-knowledge (see [`project-brief.md`](project-brief.md) for the term) end to end: every route and module must be checked against that guarantee before it ships.
-- Federation is deferred to v2, but the schema is federation-shaped from day one (global-namespaced user IDs, a `routing` module kept separate from storage) specifically to avoid the rearchitecture that retrofitting federation usually forces.
+- No federation (decision 2026-10-01): each instance is a standalone island and accounts do not talk across instances, because federating would expose sender/recipient/timing metadata between servers. User IDs stay globally namespaced and the `routing` module stays separate from storage, but only as a clean boundary, not a v2 promise.
 - Rust was picked over Go for the backend because `libsignal-client` has no official Go binding (only Rust/Swift/Kotlin/Node); using Rust everywhere it's needed (server + can share crypto reasoning with native clients) eliminates that risk entirely rather than mitigating it.
 - A Matrix-based stack (fork of Element/Synapse) was audited and rejected: mature and fast to ship, but Matrix federation exposes sender/recipient/timing metadata between homeservers by design, which conflicts with this project's zero-knowledge goal.
-- Hosting is entirely free-tier: a self-hosted VM (e.g. Oracle Cloud Always Free) for the server, database, and STUN server, plus Vercel's free tier for the web PWA. This is a hard, permanent constraint, not a bootstrap-phase choice.
-- Voice/video calls (issue #9) connect direct peer-to-peer via WebRTC, STUN-assisted (self-hosted STUN, negligible cost - it's out of the media path). No TURN relay: TURN would need to carry the actual audio/video bandwidth, an ongoing cost this project's $0-forever constraint can't absorb at any real usage, and symmetric/carrier-grade NAT calls that can't establish a direct path fail outright rather than falling back. Deliberately accepted, user-confirmed trade-off: unlike Signal (which relays every call through its own TURN servers specifically to hide each party's IP from the other), direct P2P here means both callers learn each other's public IP address - a real regression against this project's own privacy threat model, chosen anyway to keep the budget constraint. Revisit if a $0 TURN option becomes viable (e.g. a free-tier VM's bandwidth cap proves large enough in practice) or if the IP-exposure trade-off proves unacceptable.
+- Distribution (decision 2026-10-01): UmbraChat is software to self-host and the project operates no instance, so the maintainer holds no operator position; each operator carries their own legal position. The reference deployment is `compose.yaml` (Caddy serving the web build and proxying the API, the Rust server, PostgreSQL, optional coturn). The earlier plan of one free-tier VM plus Vercel is dropped. License is AGPL-3.0-only, forced by linking the AGPL `libsignal`.
+- Voice/video calls (issue #9) connect P2P via WebRTC. An optional `coturn` relay (profile `relay` in `compose.yaml`, config in `deploy/coturn/`) is the fallback for NATs that block direct paths; the server mints short-lived credentials per call (`GET /v1/turn-credentials`, env `TURN_URLS` + `TURN_SECRET`; unset => 404 and the client uses no relay). Credentials are never static or in `VITE_*`, since the web bundle is public and a static one would be an open relay. Ephemeral credentials only stop reuse outside the app: registration is open, so any registrant can mint credentials, and only coturn's `total-quota` bounds the load (usernames are random per call, so `user-quota` does not bind). No third-party STUN by default (it would tell that provider who calls whom): the operator's relay answers STUN, or `VITE_STUN_URL` is set. A relay does NOT hide callers' IPs from each other: with the default ICE policy the peers still exchange host/srflx candidates and TURN is used only as a fallback. Supersedes the earlier "no TURN" decision.
 
 ## Gotchas
 

@@ -113,7 +113,7 @@ By default no third-party STUN server is contacted by the call code.
 
 ## Authenticating a contact: the invite
 
-In the Me tab, "Show my invite" gives a string made of your account id and the fingerprint of your account's very first signed device list. A contact who pastes it in "New chat" instead of a bare account id gets a chain checked against that fingerprint: if the server shows anything that does not descend from it, the app refuses and pins nothing. Without an invite, the first chain a server shows is trusted as is.
+In the Me tab, "Copy my invite" copies (and shows) a string made of your account id and the fingerprint of your account's very first signed device list. A contact who pastes it in "New chat" instead of a bare account id gets a chain checked against that fingerprint: if the server shows anything that does not descend from it, the app refuses and pins nothing. Without an invite, the first chain a server shows is trusted as is.
 
 Give the invite over a channel the server does not control (in person, a call, a messenger you trust). Whoever can swap it in transit can swap the account. An invite does not change after you add devices, so it can be reused; it proves who you are, not that your current devices are the ones you meant (the signed device list does that).
 

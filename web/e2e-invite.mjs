@@ -12,7 +12,9 @@ const errors = [];
 const browser = await chromium.launch();
 
 async function createAccount(label) {
-  const page = await (await browser.newContext()).newPage();
+  const context = await browser.newContext();
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const page = await context.newPage();
   page.on("pageerror", (err) => errors.push(`${label}: ${err}`));
   await page.goto("http://localhost:5173");
   await page.click("text=Create Account");
@@ -25,10 +27,11 @@ async function start(page, text) {
 }
 
 const alice = await createAccount("alice");
-await alice.page.click("text=Show my invite");
+await alice.page.click("text=Copy my invite");
 await alice.page.waitForSelector('[data-testid="invite"]', { timeout: 15000 });
 const invite = (await alice.page.textContent('[data-testid="invite"]')).trim();
 check("an invite is account id plus the head of the first list", /^umbra:[0-9a-f-]{36}\.[0-9a-f]{64}$/.test(invite) && invite.includes(alice.id), invite);
+check("the button copies the invite it shows", (await alice.page.evaluate(() => navigator.clipboard.readText())) === invite);
 
 // A wrong invite (one digit changed) is refused and opens nothing.
 {

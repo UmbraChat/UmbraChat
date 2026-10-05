@@ -1,8 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessage } from "../storage/messageStore";
 import { isFileTooLarge, subscribeToTypingState, resetTypingState, type FileDestruct, type FileSendStage } from "../chat/conversation";
 import type { DeviceFingerprint } from "../crypto/trust";
 import { loadNickname, saveNickname } from "../storage/nicknameStore";
+import { Composer } from "./Composer";
+import { Sheet } from "./Sheet";
+import { showToast } from "./Toast";
+import { MoreIcon, PhoneIcon, VideoIcon } from "./icons";
 
 interface ConversationProps {
   contactId: string;
@@ -15,6 +19,7 @@ interface ConversationProps {
   onTyping: () => void;
   onBack: () => void;
   onLoadFingerprints: () => Promise<DeviceFingerprint[]>;
+  onNicknameChange: () => void;
   sending: boolean;
   fileStage?: FileSendStage;
   callActive: boolean;
@@ -32,11 +37,11 @@ const TIMER_OPTIONS: [number, string][] = [
 
 // "on-open" is its own sentinel value distinct from the numeric timers.
 const DESTRUCT_OPTIONS: [string, string][] = [
-  ["none", "None"],
-  ["on-open", "Delete after opening"],
-  ["30", "Delete after 30s"],
-  ["300", "Delete after 5m"],
-  ["3600", "Delete after 1h"],
+  ["none", "Keep it"],
+  ["on-open", "After opening"],
+  ["30", "After 30s"],
+  ["300", "After 5m"],
+  ["3600", "After 1h"],
 ];
 
 function destructFromOption(value: string): FileDestruct | undefined {
@@ -72,11 +77,21 @@ function FileMessage({ message, onOpenFile }: { message: ChatMessage; onOpenFile
   const selfDestructs = message.destructOnOpen || message.timerSeconds || message.expiresAt;
 
   return (
-    <span data-testid="file-message">
+    <span data-testid="file-message" className="file-message">
       {isImage && <img src={url} alt={file.filename} className="file-preview" data-testid="file-preview" />}
-      📎 {file.filename} ({formatSize(file.size)}){selfDestructs && <span data-testid="destruct-marker"> 🔥</span>}
+      <span>
+        {file.filename} <span className="meta">{formatSize(file.size)}</span>
+        {selfDestructs && (
+          <span data-testid="destruct-marker" className="meta">
+            {" "}
+            · deletes itself
+          </span>
+        )}
+      </span>
       {message.direction === "sent" ? (
-        <span data-testid="message-status"> ({message.status})</span>
+        <span data-testid="message-status" className="status">
+          {message.status}
+        </span>
       ) : (
         // Doesn't preventDefault - the native download still proceeds alongside the side effect.
         <a href={url} download={file.filename} data-testid="file-download" onClick={() => onOpenFile(message.id)}>
@@ -84,6 +99,39 @@ function FileMessage({ message, onOpenFile }: { message: ChatMessage; onOpenFile
         </a>
       )}
     </span>
+  );
+}
+
+/** The pairwise safety numbers, one per device of the contact, revealed group by group. */
+function VerifyContact({ name, onLoadFingerprints, onDone }: { name: string; onLoadFingerprints: () => Promise<DeviceFingerprint[]>; onDone: () => void }) {
+  const [fingerprints, setFingerprints] = useState<DeviceFingerprint[]>();
+  useEffect(() => {
+    onLoadFingerprints().then(setFingerprints, () => setFingerprints([]));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- once per opening
+
+  return (
+    <div className="page verify">
+      <h2 className="title">Verify {name}</h2>
+      <p className="hint">Compare this number with the one on {name}'s phone, in person or on a call, not in this chat. If every digit matches, nobody sits between you two.</p>
+      {fingerprints?.length === 0 && <p className="hint">No secure session with this contact yet: send a message first.</p>}
+      {fingerprints?.map((f) => {
+        const groups = f.safetyNumber.split(" ");
+        return (
+          <div key={f.deviceId} className="field">
+            <p className="label">{f.label}</p>
+            <p className="number" data-testid="contact-fingerprint">
+              {groups.map((g, i) => (
+                <span key={i} style={{ "--i": i } as React.CSSProperties}>
+                  {g}
+                  {i < groups.length - 1 ? " " : ""}
+                </span>
+              ))}
+            </p>
+          </div>
+        );
+      })}
+      <button onClick={onDone}>Done</button>
+    </div>
   );
 }
 
@@ -98,21 +146,32 @@ export function Conversation({
   onTyping,
   onBack,
   onLoadFingerprints,
+  onNicknameChange,
   sending,
   fileStage,
   callActive,
   timerSeconds,
   error,
 }: ConversationProps) {
-  const [text, setText] = useState("");
-  const [fingerprints, setFingerprints] = useState<DeviceFingerprint[]>();
+  const [{ view, dir }, setNav] = useState<{ view: "chat" | "contact" | "verify"; dir?: "fwd" | "back" }>({ view: "chat" });
+  const [nickname, setNickname] = useState<string>();
+  const [nicknameDraft, setNicknameDraft] = useState("");
+  const [contactTyping, setContactTyping] = useState(false);
+  const [fileSheet, setFileSheet] = useState(false);
   const [fileError, setFileError] = useState<string>();
   const [destructMode, setDestructMode] = useState("none");
-  const [nickname, setNickname] = useState<string>();
-  const [contactTyping, setContactTyping] = useState(false);
+  // Messages already there when the conversation opened stay still; only new ones land.
+  const initialIds = useRef<Set<string>>(null);
+  if (initialIds.current === null) initialIds.current = new Set(messages.map((m) => m.id));
+  const listEnd = useRef<HTMLLIElement>(null);
+
+  const name = nickname ?? contactId;
 
   useEffect(() => {
-    loadNickname(contactId).then(setNickname);
+    loadNickname(contactId).then((n) => {
+      setNickname(n);
+      setNicknameDraft(n ?? "");
+    });
   }, [contactId]);
 
   useEffect(() => {
@@ -124,24 +183,37 @@ export function Conversation({
     };
   }, [contactId]);
 
-  async function handleEditNickname() {
-    const next = window.prompt("Nickname for this contact (empty to clear)", nickname ?? "");
-    if (next === null) return;
+  useEffect(() => {
+    if (view === "chat") listEnd.current?.scrollIntoView({ block: "end" });
+  }, [messages.length, contactTyping, view]);
+
+  function go(next: "chat" | "contact" | "verify", direction: "fwd" | "back") {
+    // Coming back to the chat must not replay the landing of messages that already landed.
+    for (const m of messages) initialIds.current!.add(m.id);
+    setNav({ view: next, dir: direction });
+  }
+  const enter = dir ? ` enter-${dir}` : "";
+
+  async function commitNickname() {
+    const next = nicknameDraft.trim();
+    if (next === (nickname ?? "")) return;
     await saveNickname(contactId, next);
-    setNickname(next.trim() || undefined);
+    setNickname(next || undefined);
+    onNicknameChange();
+    showToast(next ? `Shown as ${next}` : "Nickname removed");
   }
 
-  function handleSend() {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    onSend(trimmed);
-    setText("");
+  function chooseTimer(seconds: number, label: string) {
+    if (seconds === timerSeconds) return;
+    onSetTimer(seconds);
+    showToast(seconds ? `New messages disappear after ${label}` : "Messages no longer disappear");
   }
 
   function handleFilePick(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow picking the same file again
     if (!file) return;
+    setFileSheet(false);
     setFileError(undefined);
     // Images get re-encoded (and usually shrunk a lot) before the real size
     // check, inside sendFile - skip the early check here so a large-but-will-
@@ -156,123 +228,164 @@ export function Conversation({
     setDestructMode("none");
   }
 
-  return (
-    <main className="convo screen screen--wide">
-      <div className="convo-toolbar">
-        <button className="secondary" onClick={onBack} aria-label="Back to menu">
-          ← Menu
-        </button>
-        <h1 data-testid="conversation-title">{nickname ?? contactId}</h1>
-        <button className="icon" onClick={handleEditNickname} aria-label="Edit nickname">
-          ✎
-        </button>
-        <span className="spacer" />
-        <button className="icon" onClick={() => onStartCall("voice")} disabled={callActive} aria-label="Voice call">
-          📞
-        </button>
-        <button className="icon" onClick={() => onStartCall("video")} disabled={callActive} aria-label="Video call">
-          🎥
-        </button>
-        <label className="row">
-          ⏱
-          <select
-            data-testid="timer-picker"
-            aria-label="Disappearing message timer"
-            value={timerSeconds}
-            onChange={(e) => onSetTimer(Number(e.target.value))}
-            disabled={sending}
-          >
-            {TIMER_OPTIONS.map(([seconds, label]) => (
-              <option key={seconds} value={seconds}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+  if (view === "verify") {
+    return (
+      <main className={`screen-pane${enter}`} key="verify">
+        <header className="bar">
+          <button className="back" onClick={() => go("contact", "back")} aria-label="Back to contact settings">
+            ‹ Back
+          </button>
+          <span />
+          <span />
+        </header>
+        <VerifyContact name={name} onLoadFingerprints={onLoadFingerprints} onDone={() => go("contact", "back")} />
+      </main>
+    );
+  }
 
-      <details
-        className="hint"
-        onToggle={(e) => {
-          if (e.currentTarget.open) onLoadFingerprints().then(setFingerprints).catch(() => setFingerprints([]));
-        }}
-      >
-        <summary>Verify this contact</summary>
-        <p>Safety number of this conversation: you and your contact must see exactly the same number. Compare in person or on a call, not in this chat.</p>
-        {fingerprints?.length === 0 && <p>No secure session with this contact yet: send a message first.</p>}
-        {fingerprints?.map((f) => (
-          <p key={f.deviceId}>
-            {f.label}
-            <span className="chip chip--block" data-testid="contact-fingerprint">
-              {f.safetyNumber}
+  if (view === "contact") {
+    return (
+      <main className={`screen-pane${enter}`} key="contact">
+        <header className="bar">
+          <button className="back" onClick={() => go("chat", "back")} aria-label="Back to chat">
+            ‹ Chat
+          </button>
+          <h1 className="bar-title">Contact settings</h1>
+          <span />
+        </header>
+        <div className="page">
+          <div className="contact-head">
+            <span className="avatar big" aria-hidden>
+              {name.slice(0, 1).toUpperCase()}
             </span>
-          </p>
-        ))}
-      </details>
+            <h2 className="title">{name}</h2>
+            {nickname && <p className="chip">{contactId}</p>}
+          </div>
+          <div className="settings-list">
+            <label className="setting">
+              <span>
+                Nickname
+                <small>Only you see it</small>
+              </span>
+              <input
+                aria-label="Nickname"
+                placeholder="None"
+                value={nicknameDraft}
+                onChange={(e) => setNicknameDraft(e.target.value)}
+                onBlur={() => void commitNickname()}
+                onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+                autoComplete="off"
+              />
+            </label>
+            <div className="setting stacked">
+              <span>
+                Disappearing messages
+                <small>New messages delete themselves this long after they are read</small>
+              </span>
+              <div className="pills" role="radiogroup" aria-label="Disappearing message timer" data-testid="timer-picker">
+                {TIMER_OPTIONS.map(([seconds, label]) => (
+                  <button key={seconds} className="pill" role="radio" aria-checked={timerSeconds === seconds} onClick={() => chooseTimer(seconds, label)} disabled={sending}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button className="setting" onClick={() => go("verify", "fwd")}>
+              <span>
+                Verify safety number
+                <small>Check nobody sits between you two</small>
+              </span>
+              <span className="chevron" aria-hidden>
+                ›
+              </span>
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
-      {contactTyping && (
-        <p className="hint" data-testid="typing-indicator">
-          {nickname ?? contactId} is typing…
-        </p>
-      )}
-
-      <p role="note" className="disclosure" data-testid="screenshot-disclosure">
-        ⚠ Screenshots can't be detected on web - assume anything shown here can be captured.
-      </p>
-
-      <ul className="message-list" data-testid="message-list">
-        {messages.length === 0 && <li className="message-list-empty">No messages yet - say hi.</li>}
-        {messages.map((m) => (
-          <li key={m.id} data-testid={`message-${m.direction}`}>
-            {m.file ? <FileMessage message={m} onOpenFile={onOpenFile} /> : <span>{m.text}</span>}
-            {!m.file && (m.timerSeconds || m.expiresAt) && <span data-testid="disappearing-marker"> ⏱</span>}
-            {m.direction === "sent" && !m.file && <span data-testid="message-status"> ({m.status})</span>}
-          </li>
-        ))}
-      </ul>
-
-      <div className="stack">
-        <div className="composer">
-          <input
-            type="text"
-            placeholder="Type a message..."
-            value={text}
-            onChange={(e) => {
-              setText(e.target.value);
-              onTyping();
-            }}
-            onKeyDown={(e) => e.key === "Enter" && handleSend()}
-            disabled={sending}
-          />
-          <button onClick={handleSend} disabled={sending || !text.trim()}>
-            Send
+  return (
+    <main className={`screen-pane convo${enter}`} key="chat">
+      <header className="bar">
+        <button className="back" onClick={onBack} aria-label="Back to menu">
+          ‹ Chats
+        </button>
+        <h1 className="bar-title" data-testid="conversation-title">
+          {name}
+        </h1>
+        <div className="bar-actions">
+          <button className="icon" onClick={() => onStartCall("voice")} disabled={callActive} aria-label="Voice call">
+            <PhoneIcon />
+          </button>
+          <button className="icon" onClick={() => onStartCall("video")} disabled={callActive} aria-label="Video call">
+            <VideoIcon />
+          </button>
+          <button className="icon" onClick={() => go("contact", "fwd")} aria-label="Contact settings">
+            <MoreIcon />
           </button>
         </div>
-        <div className="file-row">
-          <input type="file" aria-label="Attach a file" onChange={handleFilePick} disabled={sending} />
-          <select
-            data-testid="file-destruct-mode"
-            aria-label="Self-destruct mode for the next file"
-            value={destructMode}
-            onChange={(e) => setDestructMode(e.target.value)}
-            disabled={sending}
-          >
-            {DESTRUCT_OPTIONS.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
+      </header>
+
+      <p role="note" className="disclosure" data-testid="screenshot-disclosure">
+        Screenshots can't be detected on the web: anything shown here can be captured.
+      </p>
+
+      <ul className="messages" data-testid="message-list">
+        {messages.length === 0 && <li className="messages-empty">No messages yet. Say hi.</li>}
+        {messages.map((m) => (
+          <li key={m.id} data-testid={`message-${m.direction}`} className={`bubble ${m.direction}${initialIds.current!.has(m.id) ? "" : " land"}`}>
+            {m.file ? <FileMessage message={m} onOpenFile={onOpenFile} /> : <span>{m.text}</span>}
+            {!m.file && (m.timerSeconds || m.expiresAt) && (
+              <span data-testid="disappearing-marker" className="meta" title="Disappears">
+                {" "}
+                ⏱
+              </span>
+            )}
+            {m.direction === "sent" && !m.file && (
+              <span data-testid="message-status" className="status">
+                {m.status}
+              </span>
+            )}
+          </li>
+        ))}
+        {contactTyping && (
+          <li className="typing" data-testid="typing-indicator">
+            <span className="visually-hidden">{name} is typing…</span>
+            <i />
+            <i />
+            <i />
+          </li>
+        )}
+        <li ref={listEnd} className="list-end" aria-hidden />
+      </ul>
 
       {fileStage && fileStage !== "sent" && (
-        <p className="hint" data-testid="file-stage">
+        <p className="hint progress" data-testid="file-stage">
           {fileStage}...
         </p>
       )}
       {fileError && <p role="alert">{fileError}</p>}
       {error && <p role="alert">{error}</p>}
+
+      <Composer onSend={onSend} onTyping={onTyping} onAttach={() => setFileSheet(true)} sending={sending} />
+
+      <Sheet open={fileSheet} onClose={() => setFileSheet(false)} label="Send a file">
+        <h2 className="title">Send a file</h2>
+        <p className="hint">Delete it on {name}'s side:</p>
+        <div className="pills" role="radiogroup" aria-label="Self-destruct mode for the next file" data-testid="file-destruct-mode">
+          {DESTRUCT_OPTIONS.map(([value, label]) => (
+            <button key={value} className="pill" role="radio" aria-checked={destructMode === value} onClick={() => setDestructMode(value)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {/* The input lives in the sheet so the picker opens from inside the modal; tests set files on it directly. */}
+        <label className="button-like">
+          Choose a file
+          <input type="file" className="visually-hidden" aria-label="Attach a file" onChange={handleFilePick} disabled={sending} />
+        </label>
+      </Sheet>
     </main>
   );
 }

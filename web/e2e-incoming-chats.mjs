@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -24,17 +25,16 @@ const bob = await createAccount(bobCtx);
 // Bob stays idle on the identity-ready screen - never types Alice's id, never
 // clicks Start Conversation. Only Alice knows Bob's id.
 
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 await alice.page.fill('input[placeholder="Type a message..."]', "hey it's alice");
-await alice.page.click("button:has-text('Send')");
+await alice.page.click('button[aria-label="Send"]');
 
 await bob.page.waitForSelector('[data-testid="incoming-chat-row"]', { timeout: 15000 });
 const rowText = await bob.page.textContent('[data-testid="incoming-chat-row"]');
 check("bob sees a pending-chat notice naming alice's account id", rowText.includes(alice.accountId), rowText);
 
-await bob.page.click('[data-testid="incoming-chat-row"] button:has-text("Open")');
+await bob.page.click('[data-testid="incoming-chat-row"]');
 await bob.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 const bobMessages = await bob.page.locator('[data-testid="message-received"]').allTextContents();
 check("bob's opened conversation already shows alice's message (no wait for next poll)", bobMessages.some((t) => t.includes("hey it's alice")), JSON.stringify(bobMessages));
@@ -52,11 +52,10 @@ check("alice's first message reaches 'read' even though bob never had the conver
 // screen's poll, not just identity-ready's, or the notice never surfaces.
 const daveCtx = await browser.newContext();
 const dave = await createAccount(daveCtx);
-await dave.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await dave.page.click("text=Start Conversation");
+await startChat(dave.page, bob.accountId);
 await dave.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 await dave.page.fill('input[placeholder="Type a message..."]', "hi, this is dave");
-await dave.page.click("button:has-text('Send')");
+await dave.page.click('button[aria-label="Send"]');
 
 // bob is still sitting in alice's conversation right now, not on the menu.
 await bob.page.waitForTimeout(3500); // let bob's poll (in alice's conversation) pick up dave's message

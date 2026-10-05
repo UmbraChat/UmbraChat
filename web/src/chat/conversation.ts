@@ -514,8 +514,8 @@ function buildReceivedFileMessage(envelope: FileEnvelope, createdAt: string): Ch
  * Fetches and decrypts any pending messages, updates local history, and
  * replies with receipts. A text/file message from a sender other than the
  * currently open contact - including a first-ever message from someone new -
- * is still saved into that sender's own local history and reported via
- * `onIncomingChat`, rather than dropped: `GET /v1/messages` is fetch-and-
+ * is still saved into that sender's own local history rather than dropped
+ * (the chat list follows that history): `GET /v1/messages` is fetch-and-
  * delete server-side, so this is the only chance to keep it. Call signals are
  * forwarded to `onCallSignal` from any sender, open or not. Timers and
  * receipts only make sense inside an already-open conversation with that
@@ -570,7 +570,6 @@ async function pollOnce(
   store: SignalStore,
   onCallSignal?: (envelope: CallEnvelope, senderAccountId: string) => Promise<void>,
   onGroupSignal?: (envelope: GroupEnvelope, senderAccountId: string) => Promise<void>,
-  onIncomingChat?: (senderAccountId: string) => void,
 ): Promise<ChatMessage[]> {
   // Messages that could not be processed last time only because the server was unreachable go first.
   const received = [...(await takeRetries()), ...(await fetchMessages(account))];
@@ -646,10 +645,8 @@ async function pollOnce(
         await append(message.senderAccountId, buildReceivedTextMessage(envelope, message.createdAt, getTimerSeconds(message.senderAccountId)));
         // "delivered" only, not "read" - see markConversationRead's doc comment.
         await sendReceipt(message.senderAccountId, { type: "delivered", refId: envelope.id });
-        onIncomingChat?.(message.senderAccountId);
       } else if (envelope.type === "file") {
         await append(message.senderAccountId, buildReceivedFileMessage(envelope, message.createdAt));
-        onIncomingChat?.(message.senderAccountId);
       } else {
         // Timer/file-opened/receipts only make sense inside an already-
         // open conversation with that sender - nothing to update if it's not.
@@ -659,14 +656,17 @@ async function pollOnce(
       return;
     }
 
+    // The conversation is open, so these are read on arrival; storing them as such keeps them
+    // out of the chat list's unread count and out of markConversationRead's next pass.
     if (envelope.type === "text") {
-      await append(contactId, buildReceivedTextMessage(envelope, message.createdAt, getTimerSeconds(contactId)));
+      await append(contactId, { ...buildReceivedTextMessage(envelope, message.createdAt, getTimerSeconds(contactId)), status: "read" });
 
       for (const type of ["delivered", "read"] as const) {
         await sendReceipt(contactId, { type, refId: envelope.id });
       }
     } else if (envelope.type === "file") {
-      await append(contactId, buildReceivedFileMessage(envelope, message.createdAt));
+      await append(contactId, { ...buildReceivedFileMessage(envelope, message.createdAt), status: "read" });
+      await sendReceipt(contactId, { type: "read", refId: envelope.id });
     } else if (envelope.type === "timer") {
       setTimerSecondsLocal(contactId, envelope.seconds);
     } else if (envelope.type === "file-opened") {

@@ -61,6 +61,15 @@ export async function saveMessages(contactId: string, messages: ChatMessage[]): 
 // and an interleaved pair silently drops one of the two changes.
 const chains = new Map<string, Promise<unknown>>();
 
+type MessagesListener = (id: string, messages: ChatMessage[]) => void;
+const listeners = new Set<MessagesListener>();
+
+/** Called after every write through updateMessages, which every history change goes through. */
+export function onMessagesChanged(listener: MessagesListener): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
 /**
  * Applies `change` to a bucket with no other update in between. `change` edits the array in
  * place and returns nothing, or returns a replacement; return `false` to skip the write.
@@ -73,6 +82,7 @@ export function updateMessages(id: string, change: (messages: ChatMessage[]) => 
     if (result === false) return messages;
     const next = result ?? messages;
     await saveMessages(id, next);
+    for (const listener of listeners) listener(id, next);
     return next;
   });
   const tail = run.catch(() => {});

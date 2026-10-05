@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -27,20 +28,18 @@ const bob = await createAccount(bobContext, "bob");
 check("alice and bob got different account ids", alice.accountId !== bob.accountId, `alice=${alice.accountId} bob=${bob.accountId}`);
 
 // Alice starts a conversation with Bob.
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 
 await alice.page.fill('input[placeholder="Type a message..."]', "hello bob, this is alice");
-await alice.page.click("text=Send");
+await alice.page.click('button[aria-label="Send"]');
 
 await alice.page.waitForSelector('[data-testid="message-sent"]', { timeout: 15000 });
 const aliceSentText = await alice.page.textContent('[data-testid="message-sent"]');
 check("alice sees her own sent message", aliceSentText.includes("hello bob, this is alice"), aliceSentText);
 
 // Bob starts a conversation back with Alice (single-conversation MVP: he needs to point at her too) and polls.
-await bob.page.fill('input[placeholder="Recipient account id"]', alice.accountId);
-await bob.page.click("text=Start Conversation");
+await startChat(bob.page, alice.accountId);
 await bob.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 
 await bob.page.waitForSelector('[data-testid="message-received"]', { timeout: 15000 });
@@ -57,7 +56,7 @@ check("alice's message reaches read status", aliceStatus.includes("read"), alice
 
 // Bob replies.
 await bob.page.fill('input[placeholder="Type a message..."]', "hi alice, bob here");
-await bob.page.click("text=Send");
+await bob.page.click('button[aria-label="Send"]');
 
 await alice.page.waitForFunction(
   () => document.querySelector('[data-testid="message-received"]')?.textContent?.includes("bob here"),

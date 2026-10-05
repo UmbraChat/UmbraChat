@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -25,17 +26,15 @@ const bob = await createAccount(bobContext);
 
 // Alice messages Bob while Bob's conversation screen is not open at all -
 // simulating Bob being offline/away, with messages queuing server-side.
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 await alice.page.fill('input[placeholder="Type a message..."]', "queued while you were away");
-await alice.page.click("text=Send");
+await alice.page.click('button[aria-label="Send"]');
 await alice.page.waitForSelector('[data-testid="message-sent"]', { timeout: 15000 });
 
 // Now Bob "reconnects": opens the conversation for the first time.
 const openedAt = Date.now();
-await bob.page.fill('input[placeholder="Recipient account id"]', alice.accountId);
-await bob.page.click("text=Start Conversation");
+await startChat(bob.page, alice.accountId);
 await bob.page.waitForSelector('[data-testid="message-received"]', { timeout: 15000 });
 const elapsedMs = Date.now() - openedAt;
 

@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat, contactSettings, openTab, unfold } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -26,14 +27,13 @@ async function createAccount() {
 }
 
 async function open(page, peerId) {
-  await page.fill('input[placeholder="Recipient account id"]', peerId);
-  await page.click("text=Start Conversation");
+  await startChat(page, peerId);
   await page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 }
 
 async function send(page, body) {
   await page.fill('input[placeholder="Type a message..."]', body);
-  await page.click("text=Send");
+  await page.click('button[aria-label="Send"]');
 }
 
 const received = (page, body) => page.waitForSelector(`[data-testid="message-received"]:has-text("${body}")`, { timeout: 20000 });
@@ -49,6 +49,7 @@ async function linkDevice(owner) {
   const code = await text(owner.page, '[data-testid="link-code"]');
   const page = track(await (await browser.newContext()).newPage());
   await page.goto("http://localhost:5173");
+  await unfold(page, "Already have an account?");
   await page.fill('input[placeholder="Account ID"]', owner.accountId);
   await page.fill('input[placeholder="Pairing code"]', code);
   await page.click("text=Link This Device");
@@ -71,18 +72,22 @@ await received(alice.page, "hello alice");
 check("first contact raises no alert", (await alice.page.locator('[data-testid="trust-alert"]').count()) === 0);
 
 // Both sides see the same pairwise safety number, which is not either device's own key fingerprint.
-await alice.page.click("text=Verify this contact");
-await bob.page.click("text=Verify this contact");
+for (const page of [alice.page, bob.page]) {
+  await contactSettings(page);
+  await page.click("text=Verify safety number");
+}
 await alice.page.waitForSelector('[data-testid="contact-fingerprint"]', { timeout: 15000 });
 await bob.page.waitForSelector('[data-testid="contact-fingerprint"]', { timeout: 15000 });
 const aliceSees = await text(alice.page, '[data-testid="contact-fingerprint"]');
 const bobSees = await text(bob.page, '[data-testid="contact-fingerprint"]');
 check("both sides see the same safety number", aliceSees === bobSees, `${aliceSees} vs ${bobSees}`);
 check("it differs from each device's own key fingerprint", aliceSees !== bob.safetyNumber && aliceSees !== alice.safetyNumber);
+await alice.page.click('button:has-text("Done")');
+await alice.page.click('button[aria-label="Back to chat"]');
 
 // Bob links a second device and accepts it from his first one: it is in his signed device
 // list, so Alice needs no manual step to talk to it, and no alert is raised.
-await bob.page.click('button[aria-label="Back to menu"]');
+await openTab(bob.page, "me");
 const bob2 = await linkDevice(bob);
 check("the linked device has its own key", bob2.safetyNumber !== bob.safetyNumber);
 

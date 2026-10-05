@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 // Not covered here: the "failed" (NAT-blocked) end state. Both peers run on
 // localhost in this environment, so ICE always finds a direct path - there's
@@ -35,11 +36,9 @@ await bobContext.grantPermissions(["camera", "microphone"]);
 const alice = await createAccount(aliceContext);
 const bob = await createAccount(bobContext);
 
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
-await bob.page.fill('input[placeholder="Recipient account id"]', alice.accountId);
-await bob.page.click("text=Start Conversation");
+await startChat(bob.page, alice.accountId);
 await bob.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 
 // --- video call: full nominal path ---
@@ -78,9 +77,11 @@ const aliceHasRemoteStream = await alice.page.evaluate(() => document.querySelec
 check("alice's remote video element has a live MediaStream attached", aliceHasRemoteStream, aliceRemoteVideo);
 
 await alice.page.click("text=Hang Up");
+// Each side's "ended" card closes 3s after it shows, and the other side learns of the hang-up
+// at its next poll (up to 3s later): read each reason as soon as it shows.
 await alice.page.waitForSelector('[data-testid="call-ended"]', { timeout: 15000 });
-await bob.page.waitForSelector('[data-testid="call-ended"]', { timeout: 15000 });
 const aliceEndReason = await alice.page.textContent('[data-testid="call-end-reason"]');
+await bob.page.waitForSelector('[data-testid="call-ended"]', { timeout: 15000 });
 const bobEndReason = await bob.page.textContent('[data-testid="call-end-reason"]');
 check("alice sees 'Call ended' after hanging up", aliceEndReason === "Call ended", aliceEndReason);
 check("bob sees 'Call ended' too", bobEndReason === "Call ended", bobEndReason);

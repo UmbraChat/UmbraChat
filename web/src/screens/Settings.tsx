@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { isEncryptionEnabled, enableEncryption, disableEncryption, isKeyUnlockEnabled, isKeyUnlockSupported, enableKeyUnlock, disableKeyUnlock } from "../crypto/vault";
+import { isEncryptionEnabled, enableEncryption, disableEncryption, isKeyUnlockSupported, listUnlockKeys, addUnlockKey, renameUnlockKey, removeUnlockKey, type KeyUnlock } from "../crypto/vault";
 import { exportBackup } from "../crypto/backup";
 import { registerPushSubscription, unregisterPushSubscription, fetchPushPublicKey, vapidPublicKeyToUint8Array } from "../api/push";
 import { getServerUrl, isSameHostAsServer } from "../api/server";
@@ -14,7 +14,6 @@ import type { LocalAccount } from "../storage/keyStore";
 
 interface SettingsProps {
   account: LocalAccount;
-  onBack: () => void;
 }
 
 const MIN_PASSPHRASE_LENGTH = 8;
@@ -28,7 +27,7 @@ function downloadBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
-export function Settings({ account, onBack }: SettingsProps) {
+export function Settings({ account }: SettingsProps) {
   const [enabled, setEnabled] = useState(isEncryptionEnabled());
   const [settingUp, setSettingUp] = useState(false);
   const [passphrase, setPassphrase] = useState("");
@@ -36,7 +35,8 @@ export function Settings({ account, onBack }: SettingsProps) {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string>();
 
-  const [keyUnlock, setKeyUnlock] = useState(isKeyUnlockEnabled());
+  const [unlockKeys, setUnlockKeys] = useState(listUnlockKeys());
+  const [keyName, setKeyName] = useState("");
   const [keyPassphrase, setKeyPassphrase] = useState("");
   const [keyWorking, setKeyWorking] = useState(false);
   const [keyError, setKeyError] = useState<string>();
@@ -94,7 +94,7 @@ export function Settings({ account, onBack }: SettingsProps) {
     try {
       await disableEncryption();
       setEnabled(false);
-      setKeyUnlock(false);
+      setUnlockKeys([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to disable encryption");
     } finally {
@@ -102,12 +102,13 @@ export function Settings({ account, onBack }: SettingsProps) {
     }
   }
 
-  async function handleEnableKeyUnlock() {
+  async function handleAddUnlockKey() {
     setKeyWorking(true);
     setKeyError(undefined);
     try {
-      await enableKeyUnlock(keyPassphrase);
-      setKeyUnlock(true);
+      await addUnlockKey(keyPassphrase, keyName);
+      setUnlockKeys(listUnlockKeys());
+      setKeyName("");
       setKeyPassphrase("");
     } catch (err) {
       setKeyError(err instanceof Error ? err.message : "failed to set up the security key");
@@ -116,9 +117,14 @@ export function Settings({ account, onBack }: SettingsProps) {
     }
   }
 
-  function handleDisableKeyUnlock() {
-    disableKeyUnlock();
-    setKeyUnlock(false);
+  function handleRenameUnlockKey(key: KeyUnlock, name: string) {
+    renameUnlockKey(key.credentialId, name);
+    setUnlockKeys(listUnlockKeys());
+  }
+
+  function handleRemoveUnlockKey(key: KeyUnlock) {
+    removeUnlockKey(key.credentialId);
+    setUnlockKeys(listUnlockKeys());
   }
 
   async function handleExportBackup() {
@@ -184,13 +190,8 @@ export function Settings({ account, onBack }: SettingsProps) {
   }
 
   return (
-    <main className="screen">
-      <div className="convo-toolbar">
-        <button className="secondary" onClick={onBack} aria-label="Back to menu">
-          ← Menu
-        </button>
-        <h1>Settings</h1>
-      </div>
+    <div className="page">
+      <h1>Settings</h1>
 
       <section className="panel stack" data-testid="server-info">
         <h2>Server</h2>
@@ -205,7 +206,7 @@ export function Settings({ account, onBack }: SettingsProps) {
       </section>
 
       <section className="panel stack">
-        <h2>Local Encryption</h2>
+        <h2>Local encryption</h2>
         {!settingUp ? (
           <>
             <div className="row">
@@ -241,7 +242,7 @@ export function Settings({ account, onBack }: SettingsProps) {
             <button onClick={handleEnable} disabled={!canSubmit || working}>
               {working ? "Enabling..." : "Enable Encryption"}
             </button>
-            <p className="hint">⚠ If you forget this, your messages can't be recovered.</p>
+            <p className="hint">If you forget this passphrase, your messages can't be recovered.</p>
           </div>
         )}
         {error && <p role="alert">{error}</p>}
@@ -250,15 +251,16 @@ export function Settings({ account, onBack }: SettingsProps) {
       {enabled && isKeyUnlockSupported() && (
         <section className="panel stack">
           <h2>Unlock with a security key</h2>
-          {keyUnlock ? (
-            <div className="row">
-              <span data-testid="key-unlock-status">On</span>
-              <button className="danger" onClick={handleDisableKeyUnlock}>
-                Remove
-              </button>
+          {unlockKeys.length > 0 && (
+            <div className="settings-list">
+              {unlockKeys.map((key) => (
+                <UnlockKeyRow key={key.credentialId} unlockKey={key} onRename={handleRenameUnlockKey} onRemove={handleRemoveUnlockKey} />
+              ))}
             </div>
-          ) : (
+          )}
+          {unlockKeys.length === 0 ? (
             <div className="stack">
+              <input placeholder="Name, like Phone or Blue key" aria-label="New key name" value={keyName} onChange={(e) => setKeyName(e.target.value)} disabled={keyWorking} maxLength={40} />
               <input
                 type="password"
                 placeholder="Current passphrase"
@@ -266,10 +268,27 @@ export function Settings({ account, onBack }: SettingsProps) {
                 onChange={(e) => setKeyPassphrase(e.target.value)}
                 disabled={keyWorking}
               />
-              <button onClick={handleEnableKeyUnlock} disabled={!keyPassphrase || keyWorking}>
-                {keyWorking ? "Waiting for the key..." : "Set up security key"}
+              <button onClick={handleAddUnlockKey} disabled={!keyPassphrase || keyWorking}>
+                {keyWorking ? "Waiting for the key..." : "Add security key"}
               </button>
             </div>
+          ) : (
+            <details className="more">
+              <summary>Add another key</summary>
+              <div className="stack">
+                <input placeholder="Name, like Phone or Blue key" aria-label="New key name" value={keyName} onChange={(e) => setKeyName(e.target.value)} disabled={keyWorking} maxLength={40} />
+                <input
+                  type="password"
+                  placeholder="Current passphrase"
+                  value={keyPassphrase}
+                  onChange={(e) => setKeyPassphrase(e.target.value)}
+                  disabled={keyWorking}
+                />
+                <button onClick={handleAddUnlockKey} disabled={!keyPassphrase || keyWorking}>
+                  {keyWorking ? "Waiting for the key..." : "Add security key"}
+                </button>
+              </div>
+            </details>
           )}
           <p className="hint">
             A security key, or this device's fingerprint, face or PIN, can then open UmbraChat; the passphrase keeps working. Whoever can pass that check can open the app, so a weak device PIN weakens it, and a passkey may be synced to your Apple, Google or Microsoft account.
@@ -339,7 +358,7 @@ export function Settings({ account, onBack }: SettingsProps) {
       </section>
 
       <section className="panel stack">
-        <h2>Typing Indicator</h2>
+        <h2>Typing indicator</h2>
         <div className="row">
           <span data-testid="typing-indicator-status">{typingEnabled ? "On" : "Off"}</span>
           {typingEnabled ? (
@@ -352,6 +371,28 @@ export function Settings({ account, onBack }: SettingsProps) {
         </div>
         <p className="hint">Lets people you message see when you're typing. Off by default.</p>
       </section>
-    </main>
+    </div>
+  );
+}
+
+/** One registered key: its name is edited in place, saved on Enter or when the field is left. */
+function UnlockKeyRow({ unlockKey, onRename, onRemove }: { unlockKey: KeyUnlock; onRename: (key: KeyUnlock, name: string) => void; onRemove: (key: KeyUnlock) => void }) {
+  const [draft, setDraft] = useState(unlockKey.name);
+  return (
+    <div className="setting" data-testid="unlock-key">
+      <input
+        aria-label="Key name"
+        className="key-name"
+        value={draft}
+        maxLength={40}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => (draft.trim() ? draft.trim() !== unlockKey.name && onRename(unlockKey, draft) : setDraft(unlockKey.name))}
+        onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+        autoComplete="off"
+      />
+      <button className="danger" onClick={() => onRemove(unlockKey)}>
+        Remove
+      </button>
+    </div>
   );
 }

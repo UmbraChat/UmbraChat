@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 // Signed prekey rotation (crypto/prekeyRotation.ts): an aged pair is replaced, first messages
 // built against a replaced pair still decrypt (after a reload and in the same page), old pairs
@@ -29,14 +30,13 @@ async function createAccount(label) {
 }
 
 async function start(page, text) {
-  await page.fill('input[placeholder="Recipient account id"]', text);
-  await page.click("text=Start Conversation");
+  await startChat(page, text);
 }
 
 async function send(page, text) {
   await page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 20000 });
   await page.fill('input[placeholder="Type a message..."]', text);
-  await page.click("text=Send");
+  await page.click('button[aria-label="Send"]');
   await page.waitForSelector(`[data-testid="message-sent"]:has-text("${text}")`, { timeout: 15000 });
 }
 
@@ -125,7 +125,7 @@ await send(alice.page, "built on the old prekey");
 }
 
 const bobPage = await openApp(bob.context, "bob-p2");
-await bobPage.waitForSelector("text=Start Conversation", { timeout: 15000 });
+await bobPage.waitForSelector('[data-testid="new-chat"]', { timeout: 15000 });
 await start(bobPage, alice.id);
 const oldDelivered = await bobPage
   .waitForSelector('[data-testid="message-received"]:has-text("built on the old prekey")', { timeout: 20000 })

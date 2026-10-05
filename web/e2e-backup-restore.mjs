@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat, openTab, unfold } from "./ui-steps.mjs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,16 +28,14 @@ const bobCtx = await browser.newContext();
 const alice = await createAccount(aliceCtx);
 const bob = await createAccount(bobCtx);
 
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 await alice.page.fill('input[placeholder="Type a message..."]', "this should survive the backup");
-await alice.page.click("button:has-text('Send')");
+await alice.page.click('button[aria-label="Send"]');
 await alice.page.waitForTimeout(300);
 
 // --- Export a backup ---
-await alice.page.click('[aria-label="Back to menu"]');
-await alice.page.click("text=Settings");
+await openTab(alice.page, "settings");
 await alice.page.waitForSelector('[data-testid="encryption-status"]', { timeout: 15000 });
 await alice.page.fill('input[placeholder="Passphrase"]', "restore-me-please");
 
@@ -54,6 +53,7 @@ const newDeviceCtx = await browser.newContext();
 const newDevicePage = await newDeviceCtx.newPage();
 await newDevicePage.goto("http://localhost:5173");
 await newDevicePage.waitForSelector("text=Lost your device?", { timeout: 15000 });
+await unfold(newDevicePage, "Lost your device?");
 
 // Wrong passphrase first.
 await newDevicePage.setInputFiles('input[aria-label="Backup file"]', backupPath);
@@ -74,8 +74,7 @@ check("restored account id matches the original", restoredAccountId === alice.ac
 check("restored safety number matches the original", restoredSafetyNumber === alice.safetyNumber, `original=${alice.safetyNumber} restored=${restoredSafetyNumber}`);
 
 // The conversation history should have come back too.
-await newDevicePage.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await newDevicePage.click("text=Start Conversation");
+await startChat(newDevicePage, bob.accountId);
 await newDevicePage.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 const restoredMessages = await newDevicePage.locator('[data-testid="message-sent"]').allTextContents();
 check("the message sent before the backup is restored on the new device", restoredMessages.some((t) => t.includes("this should survive the backup")), JSON.stringify(restoredMessages));

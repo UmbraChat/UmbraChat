@@ -10,6 +10,19 @@ const BUILD_DEFAULT: string = import.meta.env.VITE_API_BASE ?? "";
 
 export const SERVER_URL_REQUIRED = import.meta.env.VITE_REQUIRE_SERVER_URL === "1";
 
+/**
+ * Where this copy of the app comes from. One release archive serves both as the locally
+ * installed app and as a page published for everybody: only the host serving it tells them apart.
+ * - "instance": built for one server and served by it (same origin).
+ * - "local": the generic build, served from this device.
+ * - "hosted": the generic build, served by someone else's host (a published page).
+ */
+export const DISTRIBUTION: "instance" | "local" | "hosted" = !SERVER_URL_REQUIRED
+  ? "instance"
+  : ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname)
+    ? "local"
+    : "hosted";
+
 function readStored(): string {
   try {
     return localStorage.getItem(STORAGE_KEY) ?? "";
@@ -87,6 +100,15 @@ export function setServerUrl(input: string): void {
     localStorage.setItem(STORAGE_KEY, origin);
   } catch {
     throw new Error("this browser refused to remember the server address");
+  }
+}
+
+/** Forgets the chosen server: an instance's own page then talks to its own API again. */
+export function clearServerUrl(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Nothing stored to forget.
   }
 }
 

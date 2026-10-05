@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat, openTab } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -18,8 +19,7 @@ async function createAccount(context) {
 }
 
 async function openConversationWith(page, recipientAccountId) {
-  await page.fill('input[placeholder="Recipient account id"]', recipientAccountId);
-  await page.click("text=Start Conversation");
+  await startChat(page, recipientAccountId);
   await page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 }
 
@@ -27,11 +27,10 @@ const alice = await createAccount(await browser.newContext());
 const bob = await createAccount(await browser.newContext());
 
 // --- Pref defaults off and round-trips ---
-await alice.page.click("text=Settings");
+await openTab(alice.page, "settings");
 await alice.page.waitForSelector('[data-testid="typing-indicator-status"]', { timeout: 15000 });
 const statusBefore = await alice.page.textContent('[data-testid="typing-indicator-status"]');
 check("typing indicator defaults to Off", statusBefore.trim() === "Off", statusBefore);
-await alice.page.click('button[aria-label="Back to menu"]');
 
 await openConversationWith(alice.page, bob.accountId);
 await openConversationWith(bob.page, alice.accountId);
@@ -45,7 +44,7 @@ await alice.page.fill('input[placeholder="Type a message..."]', "");
 
 // --- Enable the pref, then composing does surface it to the recipient ---
 await alice.page.click('button[aria-label="Back to menu"]');
-await alice.page.click("text=Settings");
+await openTab(alice.page, "settings");
 await alice.page.waitForSelector('[data-testid="typing-indicator-status"]', { timeout: 15000 });
 await alice.page.click('section:has(h2:text("Typing Indicator")) button:has-text("Enable")');
 await alice.page.waitForFunction(
@@ -54,7 +53,6 @@ await alice.page.waitForFunction(
 );
 check("toggling the Settings panel updates its own status label immediately", true);
 
-await alice.page.click('button[aria-label="Back to menu"]');
 await openConversationWith(alice.page, bob.accountId);
 
 await alice.page.fill('input[placeholder="Type a message..."]', "h");

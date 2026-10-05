@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 // Contact invite: authenticates the first contact against a server that shows another chain.
 // Dev server only (builds a forged chain through source modules, like e2e-device-chain).
@@ -20,8 +21,7 @@ async function createAccount(label) {
 }
 
 async function start(page, text) {
-  await page.fill('input[placeholder="Recipient account id"]', text);
-  await page.click("text=Start Conversation");
+  await startChat(page, text);
 }
 
 const alice = await createAccount("alice");
@@ -73,7 +73,7 @@ check("an invite is account id plus the head of the first list", /^umbra:[0-9a-f
   await bob.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 20000 });
   check("the right invite opens the conversation", true);
   await bob.page.fill('input[placeholder="Type a message..."]', "hello with an invite");
-  await bob.page.click("text=Send");
+  await bob.page.click('button[aria-label="Send"]');
   await bob.page.waitForSelector('[data-testid="message-sent"]', { timeout: 15000 });
   await start(alice.page, bob.id);
   await alice.page.waitForSelector('[data-testid="message-received"]:has-text("hello with an invite")', { timeout: 20000 });

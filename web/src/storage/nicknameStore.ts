@@ -39,3 +39,14 @@ export async function saveNickname(contactId: string, nickname: string): Promise
     tx.onerror = () => reject(tx.error);
   });
 }
+
+export async function loadAllNicknames(): Promise<Map<string, string>> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const store = db.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME);
+    const keys = store.getAllKeys();
+    const values = store.getAll();
+    values.onsuccess = () => resolve(new Map((keys.result as string[]).map((k, i) => [k, values.result[i] as string])));
+    values.onerror = () => reject(values.error);
+  });
+}

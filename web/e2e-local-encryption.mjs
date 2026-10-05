@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { openTab } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -37,7 +38,7 @@ const before = await readRawAccountRecord(page);
 check("before enabling, the raw account record is plain (no __encrypted marker)", before && before.__encrypted !== true, JSON.stringify(before).slice(0, 80));
 
 // --- Enable ---
-await page.click("text=Settings");
+await openTab(page, "settings");
 await page.waitForSelector('[data-testid="encryption-status"]', { timeout: 15000 });
 const statusBefore = await page.textContent('[data-testid="encryption-status"]');
 check("status starts Off", statusBefore.trim() === "Off", statusBefore);
@@ -58,7 +59,7 @@ check("after enabling, the raw account record IS an EncryptedBlob", afterEnable 
 
 // The app itself can still read through it correctly (round trip via the
 // vault stays valid within this same unlocked session).
-await page.click('[aria-label="Back to menu"]');
+await openTab(page, "me");
 await page.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
 const accountIdBeforeReload = (await page.textContent('[data-testid="account-id"]')).trim();
 check("the app itself still reads the account correctly right after enabling", accountIdBeforeReload.length > 0, accountIdBeforeReload);
@@ -79,12 +80,13 @@ check("still on the Locked screen after a failed attempt", await page.locator('h
 // Then the correct one.
 await page.fill('input[placeholder="Passphrase"]', "correct horse battery staple");
 await page.click("text=Unlock");
+await openTab(page, "me");
 await page.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
 const accountIdAfterUnlock = (await page.textContent('[data-testid="account-id"]')).trim();
 check("correct passphrase unlocks and boots into the same account as before", accountIdAfterUnlock === accountIdBeforeReload, `before=${accountIdBeforeReload} after=${accountIdAfterUnlock}`);
 
 // --- Disable ---
-await page.click("text=Settings");
+await openTab(page, "settings");
 await page.waitForSelector('[data-testid="encryption-status"]', { timeout: 15000 });
 await page.click("text=Disable");
 await page.waitForFunction(() => document.querySelector('[data-testid="encryption-status"]')?.textContent?.trim() === "Off", { timeout: 15000 });

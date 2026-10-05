@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -24,8 +25,7 @@ async function createAccount() {
 const alice = await createAccount();
 const bob = await createAccount();
 
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 
 // bob never opens a conversation: he stays on the home screen the whole time.

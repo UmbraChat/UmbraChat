@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat, contactSettings } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -50,25 +51,28 @@ const bobContext = await browser.newContext();
 const alice = await createAccount(aliceContext);
 const bob = await createAccount(bobContext);
 
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 
-await bob.page.fill('input[placeholder="Recipient account id"]', alice.accountId);
-await bob.page.click("text=Start Conversation");
+await startChat(bob.page, alice.accountId);
 await bob.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 
 // Sent before any timer is set - must survive the whole test untouched.
 await alice.page.fill('input[placeholder="Type a message..."]', "permanent message");
-await alice.page.click("text=Send");
+await alice.page.click('button[aria-label="Send"]');
 await bob.page.waitForSelector("text=permanent message", { timeout: 15000 });
 
-await alice.page.selectOption('[data-testid="timer-picker"]', "30");
+await contactSettings(alice.page);
+await alice.page.click('[data-testid="timer-picker"] [role="radio"]:has-text("30s")');
+await alice.page.click('button[aria-label="Back to chat"]');
 await bob.page.waitForTimeout(3500);
-check("bob's timer picker syncs to alice's 30s setting after his next poll", (await bob.page.inputValue('[data-testid="timer-picker"]')) === "30");
+await contactSettings(bob.page);
+const bobTimer = (await bob.page.textContent('[data-testid="timer-picker"] [aria-checked="true"]')).trim();
+check("bob's timer picker syncs to alice's 30s setting after his next poll", bobTimer === "30s", bobTimer);
+await bob.page.click('button[aria-label="Back to chat"]');
 
 await alice.page.fill('input[placeholder="Type a message..."]', "will vanish");
-await alice.page.click("text=Send");
+await alice.page.click('button[aria-label="Send"]');
 await bob.page.waitForSelector("text=will vanish", { timeout: 15000 });
 
 const aliceMarkers = await alice.page.locator('[data-testid="disappearing-marker"]').count();
@@ -86,14 +90,14 @@ await forceExpire(bob.page, alice.accountId);
 await alice.page.waitForTimeout(3500);
 await bob.page.waitForTimeout(500);
 
-const aliceStillHasIt = await alice.page.locator("text=will vanish").count();
+const aliceStillHasIt = await alice.page.locator('[data-testid="message-list"] >> text=will vanish').count();
 check("the expired message is hard-deleted from alice's device on the next poll", aliceStillHasIt === 0, `count=${aliceStillHasIt}`);
-const bobStillHasIt = await bob.page.locator("text=will vanish").count();
+const bobStillHasIt = await bob.page.locator('[data-testid="message-list"] >> text=will vanish').count();
 check("the expired message is hard-deleted from bob's device on the next poll", bobStillHasIt === 0, `count=${bobStillHasIt}`);
 
-const alicePermanent = await alice.page.locator("text=permanent message").count();
+const alicePermanent = await alice.page.locator('[data-testid="message-list"] >> text=permanent message').count();
 check("the message sent before the timer was set is untouched", alicePermanent === 1, `count=${alicePermanent}`);
-const bobPermanent = await bob.page.locator("text=permanent message").count();
+const bobPermanent = await bob.page.locator('[data-testid="message-list"] >> text=permanent message').count();
 check("...on bob's device too", bobPermanent === 1, `count=${bobPermanent}`);
 
 await browser.close();

@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat, openTab } from "./ui-steps.mjs";
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,8 +34,24 @@ async function newPage(origin) {
 }
 
 try {
-  // 1. Same-origin default build, but a server can still be chosen.
+  // 1. Same-origin default build: it names its own server, and another can still be chosen.
   const alice = await newPage("http://localhost:5173");
+  check("an instance's page says the account will live on that instance", (await text(alice.page, '[data-testid="instance-server"]')).includes("localhost:5173"));
+  check("and asks no server address up front", (await alice.page.locator('[data-testid="server-input"]').count()) === 0);
+  check("and shows no warning about a published page", (await alice.page.locator('[data-testid="hosted-notice"]').count()) === 0);
+  // The way back to this site's server, which also forgets a server chosen earlier on this device.
+  {
+    const back = await newPage("http://localhost:5173");
+    await back.page.evaluate(() => localStorage.setItem("umbrachat-server-url", "http://localhost:3000"));
+    await back.page.reload();
+    await back.page.click("text=Use this site's server");
+    check("going back hides the server field", (await back.page.locator('[data-testid="server-input"]').count()) === 0 && (await back.page.locator('[data-testid="instance-server"]').count()) === 1);
+    await back.page.click("text=Create Account");
+    await back.page.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
+    check("and the account is made on this site's server, not the one chosen before", back.requests.some((u) => u.startsWith("http://localhost:5173/v1/register")) && !back.requests.some((u) => u.startsWith(`${API}/v1/register`)));
+    await back.page.context().close();
+  }
+  await alice.page.click("text=Use another server");
   await alice.page.fill('[data-testid="server-input"]', API);
   await alice.page.click("text=Create Account");
   await alice.page.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
@@ -46,18 +63,17 @@ try {
   const bob = await newPage("http://localhost:5173");
   await bob.page.click("text=Create Account");
   await bob.page.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
-  await alice.page.fill('input[placeholder="Recipient account id"]', await text(bob.page, '[data-testid="account-id"]'));
-  await alice.page.click("text=Start Conversation");
+  await startChat(alice.page, await text(bob.page, '[data-testid="account-id"]'));
   await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
   await alice.page.fill('input[placeholder="Type a message..."]', "across origins");
-  await alice.page.click("text=Send");
-  await bob.page.fill('input[placeholder="Recipient account id"]', aliceId);
-  await bob.page.click("text=Start Conversation");
+  await alice.page.click('button[aria-label="Send"]');
+  await startChat(bob.page, aliceId);
   await bob.page.waitForSelector('[data-testid="message-received"]:has-text("across origins")', { timeout: 20000 });
   check("messages cross between a chosen server and the default one", true);
 
   // 3. Unusable addresses are refused before any request.
   const bad = await newPage("http://localhost:5173");
+  await bad.page.click("text=Use another server");
   for (const input of ["javascript:alert(1)", "http://evil.example", "ftp://evil.example", "https://user:pw@evil.example"]) {
     await bad.page.fill('[data-testid="server-input"]', input);
     await bad.page.click("text=Create Account");
@@ -68,12 +84,12 @@ try {
 
   // 4. Settings shows the server and warns only when the app and the server share a host.
   await alice.page.click('button[aria-label="Back to menu"]');
-  await alice.page.click("text=Settings");
+  await openTab(alice.page, "settings");
   await alice.page.waitForSelector('[data-testid="server-url"]', { timeout: 10000 });
   check("settings shows the chosen server", (await text(alice.page, '[data-testid="server-url"]')) === API);
   check("no same-host warning when the server is elsewhere", (await alice.page.locator('[data-testid="same-host-warning"]').count()) === 0);
   await bob.page.click('button[aria-label="Back to menu"]');
-  await bob.page.click("text=Settings");
+  await openTab(bob.page, "settings");
   await bob.page.waitForSelector('[data-testid="server-url"]', { timeout: 10000 });
   check("same-host warning when the app and server share an origin", (await bob.page.locator('[data-testid="same-host-warning"]').count()) === 1);
 
@@ -83,6 +99,7 @@ try {
   generic.page.on("console", (m) => m.text().includes("Content Security Policy") && violations.push(m.text()));
   check("the build carries its own Content-Security-Policy", (await generic.page.content()).includes('http-equiv="Content-Security-Policy"'));
   await generic.page.waitForSelector('[data-testid="server-input"]', { timeout: 10000 });
+  check("the generic build served from this device asks for a server without the published-page warning", (await generic.page.locator('[data-testid="hosted-notice"]').count()) === 0);
   check("with no server chosen, creating an account is not possible", await generic.page.locator("button", { hasText: "Create Account" }).isDisabled());
   await generic.page.fill('[data-testid="server-input"]', API);
   await generic.page.click("text=Create Account");
@@ -90,6 +107,17 @@ try {
   check("once a server is entered it works", true);
   check("and nothing it needs is blocked by that policy", violations.length === 0, violations.join(" | "));
   check("and never calls its own host's API", !generic.requests.some((u) => u.startsWith("http://localhost:5174/v1/")), generic.requests.filter((u) => u.includes("/v1/")).join(" "));
+
+  // 6. The same build served by another host (a published page) says who serves it.
+  const hosted = await (await browser.newContext()).newPage();
+  await hosted.route("http://pages.example/**", async (route) => {
+    const url = new URL(route.request().url());
+    route.fulfill({ response: await route.fetch({ url: `http://localhost:5174${url.pathname}` }) });
+  });
+  await hosted.goto("http://pages.example/");
+  await hosted.waitForSelector('[data-testid="hosted-notice"]', { timeout: 10000 });
+  check("a published copy warns that its host could change the app", (await text(hosted, '[data-testid="hosted-notice"]')).includes("pages.example"));
+  check("and still requires a server", await hosted.locator("button", { hasText: "Create Account" }).isDisabled());
 } finally {
   await browser.close();
   preview.kill();

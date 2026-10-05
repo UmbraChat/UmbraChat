@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat, unfold } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -30,6 +31,7 @@ const code = (await deviceA.textContent('[data-testid="link-code"]')).trim();
 check("a pairing code is issued", code.length > 0, code);
 
 // Device B: link using device A's account id and the code.
+await unfold(deviceB, "Already have an account?");
 await deviceB.fill('input[placeholder="Account ID"]', accountId);
 await deviceB.fill('input[placeholder="Pairing code"]', code);
 await deviceB.click("text=Link This Device");
@@ -72,11 +74,10 @@ check("device A's list shows only one device after unlinking", true);
 // the server returns an empty device list for an unknown account, so there is nothing
 // to verify and sendToContact has to refuse.
 const ghostAccountId = "00000000-0000-0000-0000-000000000000";
-await deviceA.fill('input[placeholder="Recipient account id"]', ghostAccountId);
-await deviceA.click("text=Start Conversation");
+await startChat(deviceA, ghostAccountId);
 await deviceA.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 await deviceA.fill('input[placeholder="Type a message..."]', "into the void");
-await deviceA.click("text=Send");
+await deviceA.click('button[aria-label="Send"]');
 await deviceA.waitForSelector('[role="alert"]', { timeout: 15000 });
 const ghostError = await deviceA.textContent('[role="alert"]');
 check("sending to a nonexistent account shows a visible error instead of silently vanishing", ghostError.toLowerCase().includes("signed device list"), ghostError);

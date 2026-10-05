@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -24,12 +25,10 @@ const bobContext = await browser.newContext({ bypassCSP: true });
 const alice = await createAccount(aliceContext);
 const bob = await createAccount(bobContext);
 
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 
-await bob.page.fill('input[placeholder="Recipient account id"]', alice.accountId);
-await bob.page.click("text=Start Conversation");
+await startChat(bob.page, alice.accountId);
 await bob.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 
 // A small, distinctive binary payload - not valid UTF-8, to prove raw bytes

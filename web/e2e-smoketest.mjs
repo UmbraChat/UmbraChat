@@ -63,6 +63,7 @@ const { rows: kyberRows } = await db.query("SELECT count(*) FROM kyber_signed_pr
 checks.push(["a kyber_signed_prekeys row was also created (PQXDH bundle complete)", Number(kyberRows[0].count) === countAfter, `kyber=${kyberRows[0].count} identity=${countAfter}`]);
 
 await page.reload();
+await page.click('[data-testid="tab-me"]'); // a returning account lands on its chats
 await page.waitForSelector('[data-testid="safety-number"]', { timeout: 15000 });
 const safetyNumberAfterReload = await page.textContent('[data-testid="safety-number"]');
 checks.push([

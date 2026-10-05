@@ -68,7 +68,7 @@ export async function deriveKey(passphrase: string, salt: Uint8Array, extractabl
     baseKey,
     { name: "AES-GCM", length: 256 },
     // Not extractable by default - the raw key bytes can never be read back out, even by this
-    // app's own code. Only enableKeyUnlock asks for an extractable copy, to wrap it at once.
+    // app's own code. Only addUnlockKey asks for an extractable copy, to wrap it at once.
     extractable,
     ["encrypt", "decrypt"],
   );
@@ -130,26 +130,34 @@ async function activateIfValid(key: CryptoKey, verify: () => Promise<unknown>): 
  * the vault key, and only the wrapped copy is stored, useless without the authenticator. Whoever
  * passes the authenticator's own check (including a device PIN) can open the vault with it.
  */
-interface KeyUnlock {
+export interface KeyUnlock {
   credentialId: string; // base64
+  name: string; // chosen by the user, to tell keys apart
   salt: string; // base64, the PRF input
   iv: string; // base64
   wrappedKey: string; // base64, the vault key wrapped under the PRF-derived key
 }
 
 const NO_PRF = "this browser or this authenticator cannot derive an unlock key (no WebAuthn PRF support)";
+const MAX_KEY_NAME = 40;
 
-function loadKeyUnlock(): KeyUnlock | undefined {
+/** Every registered key, oldest first. A record from before several keys were allowed is read as a one-key list. */
+export function listUnlockKeys(): KeyUnlock[] {
   try {
-    const raw = localStorage.getItem(KEY_UNLOCK_KEY);
-    return raw ? (JSON.parse(raw) as KeyUnlock) : undefined;
+    const stored = JSON.parse(localStorage.getItem(KEY_UNLOCK_KEY) ?? "[]");
+    return Array.isArray(stored) ? stored : [{ ...stored, name: "Security key" }];
   } catch {
-    return undefined;
+    return [];
   }
 }
 
+function saveUnlockKeys(keys: KeyUnlock[]): void {
+  if (keys.length) localStorage.setItem(KEY_UNLOCK_KEY, JSON.stringify(keys));
+  else localStorage.removeItem(KEY_UNLOCK_KEY);
+}
+
 export function isKeyUnlockEnabled(): boolean {
-  return loadKeyUnlock() !== undefined;
+  return listUnlockKeys().length > 0;
 }
 
 /** Whether this browser has WebAuthn at all; PRF support is only known once an authenticator answers. */
@@ -157,8 +165,12 @@ export function isKeyUnlockSupported(): boolean {
   return typeof window.PublicKeyCredential !== "undefined";
 }
 
-export function disableKeyUnlock(): void {
-  localStorage.removeItem(KEY_UNLOCK_KEY);
+export function renameUnlockKey(credentialId: string, name: string): void {
+  saveUnlockKeys(listUnlockKeys().map((k) => (k.credentialId === credentialId ? { ...k, name: name.trim().slice(0, MAX_KEY_NAME) || k.name } : k)));
+}
+
+export function removeUnlockKey(credentialId: string): void {
+  saveUnlockKeys(listUnlockKeys().filter((k) => k.credentialId !== credentialId));
 }
 
 async function wrappingKey(prfOutput: BufferSource): Promise<CryptoKey> {
@@ -176,18 +188,21 @@ function prfOutput(credential: PublicKeyCredential): BufferSource | undefined {
   return credential.getClientExtensionResults().prf?.results?.first;
 }
 
-async function evaluatePrf(credentialId: Uint8Array, salt: Uint8Array): Promise<BufferSource> {
+const base64url = (b64: string) => b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+/** One prompt for any of the given keys, each with its own salt; returns which key answered and its secret. */
+async function evaluatePrf(keys: Pick<KeyUnlock, "credentialId" | "salt">[]): Promise<{ credentialId: string; output: BufferSource }> {
   const assertion = (await navigator.credentials.get({
     publicKey: {
       challenge: crypto.getRandomValues(new Uint8Array(32)),
-      allowCredentials: [{ type: "public-key", id: credentialId as BufferSource }],
+      allowCredentials: keys.map((k) => ({ type: "public-key", id: fromBase64(k.credentialId) as BufferSource })),
       userVerification: "required",
-      extensions: { prf: { eval: { first: salt as BufferSource } } },
+      extensions: { prf: { evalByCredential: Object.fromEntries(keys.map((k) => [base64url(k.credentialId), { first: fromBase64(k.salt) as BufferSource }])) } },
     },
   })) as PublicKeyCredential | null;
   const output = assertion && prfOutput(assertion);
   if (!output) throw new Error(NO_PRF);
-  return output;
+  return { credentialId: toBase64(new Uint8Array(assertion.rawId)), output };
 }
 
 /**
@@ -196,7 +211,7 @@ async function evaluatePrf(credentialId: Uint8Array, salt: Uint8Array): Promise<
  * and checked against the active one before anything is stored. It also keeps someone who finds
  * the app unlocked from adding an authenticator of their own.
  */
-export async function enableKeyUnlock(passphrase: string): Promise<void> {
+export async function addUnlockKey(passphrase: string, name: string): Promise<void> {
   const saltB64 = localStorage.getItem(SALT_KEY);
   if (!activeKey || !saltB64) throw new Error("turn on local encryption first");
   const vaultKey = await deriveKey(passphrase, fromBase64(saltB64), true);
@@ -210,6 +225,7 @@ export async function enableKeyUnlock(passphrase: string): Promise<void> {
   const capabilities = await PublicKeyCredential.getClientCapabilities?.().catch(() => undefined);
   if (capabilities?.["extension:prf"] === false) throw new Error(NO_PRF);
 
+  const existing = listUnlockKeys();
   const prfSalt = crypto.getRandomValues(new Uint8Array(32));
   const credential = (await navigator.credentials.create({
     publicKey: {
@@ -223,26 +239,36 @@ export async function enableKeyUnlock(passphrase: string): Promise<void> {
         { type: "public-key", alg: -257 },
       ],
       authenticatorSelection: { userVerification: "required", residentKey: "discouraged" },
+      // The same authenticator twice would only add a duplicate entry.
+      excludeCredentials: existing.map((k) => ({ type: "public-key", id: fromBase64(k.credentialId) as BufferSource })),
       extensions: { prf: { eval: { first: prfSalt } } },
     },
   })) as PublicKeyCredential | null;
   if (!credential) throw new Error("no authenticator was registered");
   const credentialId = new Uint8Array(credential.rawId);
   // Some authenticators only compute PRF when used, not when created.
-  const output = prfOutput(credential) ?? (credential.getClientExtensionResults().prf?.enabled ? await evaluatePrf(credentialId, prfSalt) : undefined);
+  const output = prfOutput(credential) ?? (credential.getClientExtensionResults().prf?.enabled ? (await evaluatePrf([{ credentialId: toBase64(credentialId), salt: toBase64(prfSalt) }])).output : undefined);
   if (!output) throw new Error(NO_PRF);
 
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const wrapped = await crypto.subtle.wrapKey("raw", vaultKey, await wrappingKey(output), { name: "AES-GCM", iv });
-  const record: KeyUnlock = { credentialId: toBase64(credentialId), salt: toBase64(prfSalt), iv: toBase64(iv), wrappedKey: toBase64(new Uint8Array(wrapped)) };
-  localStorage.setItem(KEY_UNLOCK_KEY, JSON.stringify(record));
+  const record: KeyUnlock = {
+    credentialId: toBase64(credentialId),
+    name: name.trim().slice(0, MAX_KEY_NAME) || `Security key ${existing.length + 1}`,
+    salt: toBase64(prfSalt),
+    iv: toBase64(iv),
+    wrappedKey: toBase64(new Uint8Array(wrapped)),
+  };
+  saveUnlockKeys([...listUnlockKeys(), record]);
 }
 
-/** Unlocks with the registered authenticator. False when its secret does not open this vault; throws when the authenticator refused or was cancelled. */
+/** Unlocks with whichever registered authenticator answers. False when its secret does not open this vault; throws when the authenticator refused or was cancelled. */
 export async function unlockWithKey(verify: () => Promise<unknown>): Promise<boolean> {
-  const record = loadKeyUnlock();
+  const keys = listUnlockKeys();
+  if (!keys.length) return false;
+  const { credentialId, output } = await evaluatePrf(keys);
+  const record = keys.find((k) => k.credentialId === credentialId);
   if (!record) return false;
-  const output = await evaluatePrf(fromBase64(record.credentialId), fromBase64(record.salt));
   let key: CryptoKey;
   try {
     key = await crypto.subtle.unwrapKey(

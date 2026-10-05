@@ -70,7 +70,7 @@ export function LinkedDevices({ account }: LinkedDevicesProps) {
 
   return (
     <section className="panel stack">
-      <h2>Linked Devices</h2>
+      <h2>Linked devices</h2>
       <ul data-testid="device-list">
         {devices.length === 0 && <li className="list-empty">No devices yet.</li>}
         {devices.map((d) => (

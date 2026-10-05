@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -22,11 +23,9 @@ const bobCtx = await browser.newContext();
 const alice = await createAccount(aliceCtx);
 const bob = await createAccount(bobCtx);
 
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
-await bob.page.fill('input[placeholder="Recipient account id"]', alice.accountId);
-await bob.page.click("text=Start Conversation");
+await startChat(bob.page, alice.accountId);
 await bob.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 
 // A realistic, non-image ~6MB payload, well under MAX_FILE_BYTES (8MB) - not

@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { openTab } from "./ui-steps.mjs";
 import { execSync } from "node:child_process";
 
 const checks = [];
@@ -72,7 +73,7 @@ const deviceId = await page.evaluate(async () => {
 });
 check("device id is readable for the direct-DB checks below", !!deviceId, deviceId);
 
-await page.click("text=Settings");
+await openTab(page, "settings");
 await page.waitForSelector('[data-testid="notifications-status"]', { timeout: 15000 });
 const statusBefore = await page.textContent('[data-testid="notifications-status"]');
 check("status starts Off", statusBefore.trim() === "Off", statusBefore);

@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -44,8 +45,11 @@ async function forceExpire(page, contactId) {
   }, contactId);
 }
 
+const DESTRUCT_LABELS = { none: "Keep it", "on-open": "After opening", 30: "After 30s" };
+
 async function sendFile(page, name, bytesLen, destructMode) {
-  await page.selectOption('[data-testid="file-destruct-mode"]', destructMode);
+  await page.click('button[aria-label="Send a file"]');
+  await page.click(`[data-testid="file-destruct-mode"] [role="radio"]:has-text("${DESTRUCT_LABELS[destructMode]}")`);
   await page.setInputFiles('input[type="file"]', {
     name,
     mimeType: "application/octet-stream",
@@ -58,11 +62,9 @@ const bobContext = await browser.newContext();
 const alice = await createAccount(aliceContext);
 const bob = await createAccount(bobContext);
 
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
-await bob.page.fill('input[placeholder="Recipient account id"]', alice.accountId);
-await bob.page.click("text=Start Conversation");
+await startChat(bob.page, alice.accountId);
 await bob.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 
 // --- baseline: no destruct mode, unaffected ---
@@ -78,7 +80,7 @@ const aliceMarkerCount = await alice.page.locator('[data-testid="destruct-marker
 check("the on-open file shows the destruct marker on the sender's side", aliceMarkerCount >= 1, `count=${aliceMarkerCount}`);
 
 await bob.page.locator('[data-testid="message-received"]:has-text("on-open.bin") [data-testid="file-download"]').click();
-await bob.page.waitForFunction(() => !document.body.textContent.includes("on-open.bin"), { timeout: 15000 });
+await bob.page.waitForFunction(() => !document.querySelector('[data-testid="message-list"]').textContent.includes("on-open.bin"), { timeout: 15000 });
 check("opening the on-open file removes it from the recipient's list immediately", true);
 
 await alice.page.waitForFunction(
@@ -88,8 +90,10 @@ await alice.page.waitForFunction(
 check("the sender's copy shows status 'opened'", true);
 
 // --- destruct mode resets after each send, doesn't silently carry over ---
-const modeAfterSend = await alice.page.inputValue('[data-testid="file-destruct-mode"]');
-check("the destruct-mode picker resets to 'None' after sending, not a standing policy", modeAfterSend === "none", modeAfterSend);
+await alice.page.click('button[aria-label="Send a file"]');
+const modeAfterSend = (await alice.page.textContent('[data-testid="file-destruct-mode"] [aria-checked="true"]')).trim();
+await alice.page.keyboard.press("Escape");
+check("the destruct-mode picker resets to 'Keep it' after sending, not a standing policy", modeAfterSend === "Keep it", modeAfterSend);
 
 // --- timed ---
 await sendFile(alice.page, "timed.bin", 256, "30");
@@ -100,12 +104,12 @@ await forceExpire(bob.page, alice.accountId);
 await alice.page.waitForTimeout(3500);
 await bob.page.waitForTimeout(500);
 
-const aliceTimedGone = await alice.page.locator("text=timed.bin").count();
+const aliceTimedGone = await alice.page.locator('[data-testid="message-list"] >> text=timed.bin').count();
 check("the timed file is hard-deleted from the sender's device after expiry", aliceTimedGone === 0, `count=${aliceTimedGone}`);
-const bobTimedGone = await bob.page.locator("text=timed.bin").count();
+const bobTimedGone = await bob.page.locator('[data-testid="message-list"] >> text=timed.bin').count();
 check("the timed file is hard-deleted from the recipient's device after expiry, unopened", bobTimedGone === 0, `count=${bobTimedGone}`);
 
-const alicePermanentStillThere = await alice.page.locator("text=permanent.bin").count();
+const alicePermanentStillThere = await alice.page.locator('[data-testid="message-list"] >> text=permanent.bin').count();
 check("the permanent file survives the whole run untouched", alicePermanentStillThere === 1, `count=${alicePermanentStillThere}`);
 
 await browser.close();

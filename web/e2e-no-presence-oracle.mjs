@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 const checks = [];
 function check(label, ok, detail) {
@@ -23,11 +24,10 @@ const alice = await createAccount(aliceCtx);
 const bob = await createAccount(bobCtx);
 // Bob stays idle - never opens the conversation, never clicks anything.
 
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 await alice.page.fill('input[placeholder="Type a message..."]', "probe message");
-await alice.page.click("button:has-text('Send')");
+await alice.page.click('button[aria-label="Send"]');
 
 // Give bob's idle poll (and a couple more ticks) plenty of time to process
 // the message - this is the presence-oracle window: does "read" leak before
@@ -44,7 +44,7 @@ check(
 check("it does show 'delivered' though - that part stays automatic", aliceStatus.includes("delivered"), aliceStatus);
 
 // Now bob actually opens it - only now should "read" appear.
-await bob.page.click('[data-testid="incoming-chat-row"] button:has-text("Open")');
+await bob.page.click('[data-testid="incoming-chat-row"]');
 await alice.page.waitForFunction(() => document.querySelector('[data-testid="message-status"]')?.textContent?.includes("read"), { timeout: 10000 });
 const aliceStatusAfter = await alice.page.textContent('[data-testid="message-status"]');
 check("alice's message reaches 'read' once bob actually opens the conversation", aliceStatusAfter.includes("read"), aliceStatusAfter);

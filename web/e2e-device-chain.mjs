@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat, unfold } from "./ui-steps.mjs";
 
 // The signed device list against a hostile server. Every scenario puts a route in front of one
 // client and changes what the server says: forged statement, substituted prekey-bundle key,
@@ -32,6 +33,7 @@ async function linkDevice(owner, label) {
   await owner.page.waitForSelector('[data-testid="link-code"]', { timeout: 15000 });
   const code = (await owner.page.textContent('[data-testid="link-code"]')).trim();
   const page = await newPage(label);
+  await unfold(page, "Already have an account?");
   await page.fill('input[placeholder="Account ID"]', owner.id);
   await page.fill('input[placeholder="Pairing code"]', code);
   await page.click("text=Link This Device");
@@ -42,14 +44,13 @@ async function linkDevice(owner, label) {
 }
 
 async function openConversation(page, contactId) {
-  await page.fill('input[placeholder="Recipient account id"]', contactId);
-  await page.click("text=Start Conversation");
+  await startChat(page, contactId);
   await page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 }
 
 async function send(page, text) {
   await page.fill('input[placeholder="Type a message..."]', text);
-  await page.click("text=Send");
+  await page.click('button[aria-label="Send"]');
 }
 
 const notice = (page, reason) => page.locator(`[data-testid="trust-alert"][data-reason="${reason}"]`);
@@ -137,6 +138,7 @@ const received = (page) => page.locator('[data-testid="message-received"]').allT
     await route.fulfill({ response, json: real.map((d) => ({ ...d, identity_public_key: attackerKey })) });
   });
   const newDevice = await newPage("newdevice");
+  await unfold(newDevice, "Already have an account?");
   await newDevice.fill('input[placeholder="Account ID"]', owner.id);
   await newDevice.fill('input[placeholder="Pairing code"]', code);
   await newDevice.click("text=Link This Device");

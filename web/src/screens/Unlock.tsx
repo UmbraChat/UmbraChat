@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Logo } from "./icons";
 
 interface UnlockProps {
   onUnlock: (passphrase: string) => Promise<boolean>;
@@ -40,7 +41,11 @@ export function Unlock({ onUnlock, onUnlockWithKey }: UnlockProps) {
 
   return (
     <main className="screen">
-      <h1>UmbraChat — Locked</h1>
+      <div className="brand">
+        <Logo />
+        <h1>Locked</h1>
+        <p>Enter your passphrase to open UmbraChat.</p>
+      </div>
       <section className="panel stack">
         <input
           type="password"

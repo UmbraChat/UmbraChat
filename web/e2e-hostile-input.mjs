@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { startChat } from "./ui-steps.mjs";
 
 // What a hostile server (junk injected into the fetched batch) or a hostile contact (crafted
 // envelopes) can do to a client. Fetch is fetch-and-delete, so one throw while handling a batch
@@ -27,11 +28,10 @@ const alice = await createAccount(await browser.newContext(), "alice");
 const bob = await createAccount(await browser.newContext(), "bob");
 
 // A real first message, so Alice and Bob share a session.
-await alice.page.fill('input[placeholder="Recipient account id"]', bob.accountId);
-await alice.page.click("text=Start Conversation");
+await startChat(alice.page, bob.accountId);
 await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 await alice.page.fill('input[placeholder="Type a message..."]', "first");
-await alice.page.click("text=Send");
+await alice.page.click('button[aria-label="Send"]');
 await alice.page.waitForSelector('[data-testid="message-sent"]', { timeout: 15000 });
 
 const aliceDeviceId = await alice.page.evaluate(async () => (await (await import("/src/storage/keyStore.ts")).loadAccount()).deviceId);
@@ -52,8 +52,7 @@ await bob.page.route("**/v1/messages", async (route) => {
   await route.fulfill({ response, json: [...junk, ...real] });
 });
 
-await bob.page.fill('input[placeholder="Recipient account id"]', alice.accountId);
-await bob.page.click("text=Start Conversation");
+await startChat(bob.page, alice.accountId);
 await bob.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
 await bob.page.waitForSelector('[data-testid="message-received"]', { timeout: 15000 });
 check("a real message gets through a batch full of junk", (await bob.page.textContent('[data-testid="message-received"]')).includes("first"));

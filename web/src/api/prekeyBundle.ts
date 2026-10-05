@@ -1,7 +1,23 @@
 import type { LocalAccount } from "../storage/keyStore";
 import type { ContactBundle } from "../crypto/session";
+import type { SignedPrekeyPair } from "../crypto/identity";
 import { signedFetch } from "./signedRequest";
-import { fromBase64 as fromBase64Bytes } from "./codec";
+import { fromBase64 as fromBase64Bytes, toBase64 } from "./codec";
+
+/**
+ * Asks the server to serve `pair` in this device's bundle from now on. False when the server
+ * refused it (it will never serve it); throws when the server could not be asked or failed.
+ */
+export async function uploadSignedPrekeys(account: LocalAccount, pair: SignedPrekeyPair): Promise<boolean> {
+  const encode = (key: SignedPrekeyPair["signed_prekey"]) => ({ key_id: key.key_id, public_key: toBase64(key.public_key), signature: toBase64(key.signature) });
+  const response = await signedFetch(`/v1/devices/${account.deviceId}/signed-prekeys`, "POST", account, {
+    signed_prekey: encode(pair.signed_prekey),
+    kyber_signed_prekey: encode(pair.kyber_signed_prekey),
+  });
+  if (response.ok) return true;
+  if (response.status >= 400 && response.status < 500) return false;
+  throw new Error(`prekey upload failed (${response.status})`);
+}
 
 function fromBase64(value: string): number[] {
   return Array.from(fromBase64Bytes(value));

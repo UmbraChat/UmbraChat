@@ -1,10 +1,11 @@
 import { toBase64, fromBase64 } from "../api/codec";
-import { loadAccount, saveAccount, loadSession, saveSession, listSessionContactIds } from "../storage/keyStore";
+import { loadAccount, saveAccount, loadSession, saveSession, listSessionContactIds, withAccountLock } from "../storage/keyStore";
 import { loadMessages, saveMessages, listMessageContactIds } from "../storage/messageStore";
 import { loadAllGroups, saveGroup } from "../storage/groupStore";
 
 const SALT_KEY = "umbrachat:vaultSalt";
 const ENABLED_KEY = "umbrachat:vaultEnabled";
+const KEY_UNLOCK_KEY = "umbrachat:vaultKeyUnlock";
 const PBKDF2_ITERATIONS = 600_000;
 
 interface EncryptedBlob {
@@ -60,14 +61,15 @@ export function isEncryptionEnabled(): boolean {
 /** Exported for crypto/backup.ts, which needs the exact same PBKDF2 shape for
  * its own (independent) passphrase - see the plan's Decisions for why a
  * backup's passphrase is never the same key as the local-encryption one. */
-export async function deriveKey(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
+export async function deriveKey(passphrase: string, salt: Uint8Array, extractable = false): Promise<CryptoKey> {
   const baseKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(passphrase), "PBKDF2", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
     { name: "PBKDF2", salt: salt as BufferSource, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
     baseKey,
     { name: "AES-GCM", length: 256 },
-    // Not extractable - the raw key bytes can never be read back out, even by this app's own code.
-    false,
+    // Not extractable by default - the raw key bytes can never be read back out, even by this
+    // app's own code. Only enableKeyUnlock asks for an extractable copy, to wrap it at once.
+    extractable,
     ["encrypt", "decrypt"],
   );
 }
@@ -103,7 +105,10 @@ export async function decryptFromStorage<T>(stored: unknown): Promise<T | undefi
 export async function unlock(passphrase: string, verify: () => Promise<unknown>): Promise<boolean> {
   const saltB64 = localStorage.getItem(SALT_KEY);
   if (!saltB64) return false;
-  const key = await deriveKey(passphrase, fromBase64(saltB64));
+  return activateIfValid(await deriveKey(passphrase, fromBase64(saltB64)), verify);
+}
+
+async function activateIfValid(key: CryptoKey, verify: () => Promise<unknown>): Promise<boolean> {
   activeKey = key;
   try {
     const result = await verify();
@@ -113,9 +118,146 @@ export async function unlock(passphrase: string, verify: () => Promise<unknown>)
     }
     return true;
   } catch {
-    activeKey = null; // wrong passphrase - GCM auth tag check failed
+    activeKey = null; // wrong key - GCM auth tag check failed
     return false;
   }
+}
+
+/**
+ * Unlocking with a security key or the device's own lock (fingerprint, face, PIN), in addition
+ * to the passphrase, never instead of it. The authenticator's WebAuthn PRF extension turns a
+ * stored salt into a secret only it can compute, after verifying the user; that secret wraps
+ * the vault key, and only the wrapped copy is stored, useless without the authenticator. Whoever
+ * passes the authenticator's own check (including a device PIN) can open the vault with it.
+ */
+interface KeyUnlock {
+  credentialId: string; // base64
+  salt: string; // base64, the PRF input
+  iv: string; // base64
+  wrappedKey: string; // base64, the vault key wrapped under the PRF-derived key
+}
+
+const NO_PRF = "this browser or this authenticator cannot derive an unlock key (no WebAuthn PRF support)";
+
+function loadKeyUnlock(): KeyUnlock | undefined {
+  try {
+    const raw = localStorage.getItem(KEY_UNLOCK_KEY);
+    return raw ? (JSON.parse(raw) as KeyUnlock) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function isKeyUnlockEnabled(): boolean {
+  return loadKeyUnlock() !== undefined;
+}
+
+/** Whether this browser has WebAuthn at all; PRF support is only known once an authenticator answers. */
+export function isKeyUnlockSupported(): boolean {
+  return typeof window.PublicKeyCredential !== "undefined";
+}
+
+export function disableKeyUnlock(): void {
+  localStorage.removeItem(KEY_UNLOCK_KEY);
+}
+
+async function wrappingKey(prfOutput: BufferSource): Promise<CryptoKey> {
+  const secret = await crypto.subtle.importKey("raw", prfOutput, "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(0), info: new TextEncoder().encode("umbrachat vault key wrap v1") },
+    secret,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["wrapKey", "unwrapKey"],
+  );
+}
+
+function prfOutput(credential: PublicKeyCredential): BufferSource | undefined {
+  return credential.getClientExtensionResults().prf?.results?.first;
+}
+
+async function evaluatePrf(credentialId: Uint8Array, salt: Uint8Array): Promise<BufferSource> {
+  const assertion = (await navigator.credentials.get({
+    publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      allowCredentials: [{ type: "public-key", id: credentialId as BufferSource }],
+      userVerification: "required",
+      extensions: { prf: { eval: { first: salt as BufferSource } } },
+    },
+  })) as PublicKeyCredential | null;
+  const output = assertion && prfOutput(assertion);
+  if (!output) throw new Error(NO_PRF);
+  return output;
+}
+
+/**
+ * Registers an authenticator that can unlock the vault. Asks for the passphrase again: the
+ * active key cannot be exported, so the same key is derived anew in a form that can be wrapped,
+ * and checked against the active one before anything is stored. It also keeps someone who finds
+ * the app unlocked from adding an authenticator of their own.
+ */
+export async function enableKeyUnlock(passphrase: string): Promise<void> {
+  const saltB64 = localStorage.getItem(SALT_KEY);
+  if (!activeKey || !saltB64) throw new Error("turn on local encryption first");
+  const vaultKey = await deriveKey(passphrase, fromBase64(saltB64), true);
+  const probeIv = crypto.getRandomValues(new Uint8Array(12));
+  const probe = await crypto.subtle.encrypt({ name: "AES-GCM", iv: probeIv }, activeKey, new Uint8Array(16));
+  try {
+    await crypto.subtle.decrypt({ name: "AES-GCM", iv: probeIv }, vaultKey, probe);
+  } catch {
+    throw new Error("wrong passphrase");
+  }
+  const capabilities = await PublicKeyCredential.getClientCapabilities?.().catch(() => undefined);
+  if (capabilities?.["extension:prf"] === false) throw new Error(NO_PRF);
+
+  const prfSalt = crypto.getRandomValues(new Uint8Array(32));
+  const credential = (await navigator.credentials.create({
+    publicKey: {
+      rp: { name: "UmbraChat" },
+      // Generic names: a passkey manager that syncs would otherwise keep an account id.
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: "UmbraChat", displayName: "UmbraChat local unlock" },
+      // No server checks this ceremony: what matters is the PRF secret, which only the authenticator can compute.
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      pubKeyCredParams: [
+        { type: "public-key", alg: -7 },
+        { type: "public-key", alg: -257 },
+      ],
+      authenticatorSelection: { userVerification: "required", residentKey: "discouraged" },
+      extensions: { prf: { eval: { first: prfSalt } } },
+    },
+  })) as PublicKeyCredential | null;
+  if (!credential) throw new Error("no authenticator was registered");
+  const credentialId = new Uint8Array(credential.rawId);
+  // Some authenticators only compute PRF when used, not when created.
+  const output = prfOutput(credential) ?? (credential.getClientExtensionResults().prf?.enabled ? await evaluatePrf(credentialId, prfSalt) : undefined);
+  if (!output) throw new Error(NO_PRF);
+
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const wrapped = await crypto.subtle.wrapKey("raw", vaultKey, await wrappingKey(output), { name: "AES-GCM", iv });
+  const record: KeyUnlock = { credentialId: toBase64(credentialId), salt: toBase64(prfSalt), iv: toBase64(iv), wrappedKey: toBase64(new Uint8Array(wrapped)) };
+  localStorage.setItem(KEY_UNLOCK_KEY, JSON.stringify(record));
+}
+
+/** Unlocks with the registered authenticator. False when its secret does not open this vault; throws when the authenticator refused or was cancelled. */
+export async function unlockWithKey(verify: () => Promise<unknown>): Promise<boolean> {
+  const record = loadKeyUnlock();
+  if (!record) return false;
+  const output = await evaluatePrf(fromBase64(record.credentialId), fromBase64(record.salt));
+  let key: CryptoKey;
+  try {
+    key = await crypto.subtle.unwrapKey(
+      "raw",
+      fromBase64(record.wrappedKey) as BufferSource,
+      await wrappingKey(output),
+      { name: "AES-GCM", iv: fromBase64(record.iv) as BufferSource },
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"],
+    );
+  } catch {
+    return false;
+  }
+  return activateIfValid(key, verify);
 }
 
 /**
@@ -127,41 +269,46 @@ export async function unlock(passphrase: string, verify: () => Promise<unknown>)
  * old plaintext shape, or the reverse.
  */
 export async function enableEncryption(passphrase: string): Promise<void> {
-  const account = await loadAccount();
-  const sessionIds = await listSessionContactIds();
-  const sessions = await Promise.all(sessionIds.map(async (id) => [id, await loadSession(id)] as const));
-  const messageIds = await listMessageContactIds();
-  const messages = await Promise.all(messageIds.map(async (id) => [id, await loadMessages(id)] as const));
-  const groups = await loadAllGroups();
+  return withAccountLock(async () => {
+    const account = await loadAccount();
+    const sessionIds = await listSessionContactIds();
+    const sessions = await Promise.all(sessionIds.map(async (id) => [id, await loadSession(id)] as const));
+    const messageIds = await listMessageContactIds();
+    const messages = await Promise.all(messageIds.map(async (id) => [id, await loadMessages(id)] as const));
+    const groups = await loadAllGroups();
 
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const key = await deriveKey(passphrase, salt);
-  localStorage.setItem(SALT_KEY, toBase64(salt));
-  localStorage.setItem(ENABLED_KEY, "1");
-  activeKey = key;
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const key = await deriveKey(passphrase, salt);
+    localStorage.setItem(SALT_KEY, toBase64(salt));
+    localStorage.setItem(ENABLED_KEY, "1");
+    activeKey = key;
 
-  if (account) await saveAccount(account);
-  for (const [id, bytes] of sessions) if (bytes) await saveSession(id, bytes);
-  for (const [id, msgs] of messages) await saveMessages(id, msgs);
-  for (const group of groups) await saveGroup(group);
+    if (account) await saveAccount(account);
+    for (const [id, bytes] of sessions) if (bytes) await saveSession(id, bytes);
+    for (const [id, msgs] of messages) await saveMessages(id, msgs);
+    for (const group of groups) await saveGroup(group);
+  });
 }
 
 /** Reverse of enableEncryption: read everything while still encrypted, THEN
  * clear the key/flag, THEN write everything back out as plaintext. */
 export async function disableEncryption(): Promise<void> {
-  const account = await loadAccount();
-  const sessionIds = await listSessionContactIds();
-  const sessions = await Promise.all(sessionIds.map(async (id) => [id, await loadSession(id)] as const));
-  const messageIds = await listMessageContactIds();
-  const messages = await Promise.all(messageIds.map(async (id) => [id, await loadMessages(id)] as const));
-  const groups = await loadAllGroups();
+  return withAccountLock(async () => {
+    const account = await loadAccount();
+    const sessionIds = await listSessionContactIds();
+    const sessions = await Promise.all(sessionIds.map(async (id) => [id, await loadSession(id)] as const));
+    const messageIds = await listMessageContactIds();
+    const messages = await Promise.all(messageIds.map(async (id) => [id, await loadMessages(id)] as const));
+    const groups = await loadAllGroups();
 
-  activeKey = null;
-  localStorage.removeItem(SALT_KEY);
-  localStorage.removeItem(ENABLED_KEY);
+    activeKey = null;
+    localStorage.removeItem(SALT_KEY);
+    localStorage.removeItem(ENABLED_KEY);
+    localStorage.removeItem(KEY_UNLOCK_KEY);
 
-  if (account) await saveAccount(account);
-  for (const [id, bytes] of sessions) if (bytes) await saveSession(id, bytes);
-  for (const [id, msgs] of messages) await saveMessages(id, msgs);
-  for (const group of groups) await saveGroup(group);
+    if (account) await saveAccount(account);
+    for (const [id, bytes] of sessions) if (bytes) await saveSession(id, bytes);
+    for (const [id, msgs] of messages) await saveMessages(id, msgs);
+    for (const group of groups) await saveGroup(group);
+  });
 }

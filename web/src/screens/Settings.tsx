@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { isEncryptionEnabled, enableEncryption, disableEncryption } from "../crypto/vault";
+import { isEncryptionEnabled, enableEncryption, disableEncryption, isKeyUnlockEnabled, isKeyUnlockSupported, enableKeyUnlock, disableKeyUnlock } from "../crypto/vault";
 import { exportBackup } from "../crypto/backup";
 import { registerPushSubscription, unregisterPushSubscription, fetchPushPublicKey, vapidPublicKeyToUint8Array } from "../api/push";
 import { getServerUrl, isSameHostAsServer } from "../api/server";
@@ -35,6 +35,11 @@ export function Settings({ account, onBack }: SettingsProps) {
   const [confirm, setConfirm] = useState("");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string>();
+
+  const [keyUnlock, setKeyUnlock] = useState(isKeyUnlockEnabled());
+  const [keyPassphrase, setKeyPassphrase] = useState("");
+  const [keyWorking, setKeyWorking] = useState(false);
+  const [keyError, setKeyError] = useState<string>();
 
   // Deliberately separate from the encryption passphrase above - a backup's
   // passphrase is never the same key (see the plan's Decisions).
@@ -89,11 +94,31 @@ export function Settings({ account, onBack }: SettingsProps) {
     try {
       await disableEncryption();
       setEnabled(false);
+      setKeyUnlock(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to disable encryption");
     } finally {
       setWorking(false);
     }
+  }
+
+  async function handleEnableKeyUnlock() {
+    setKeyWorking(true);
+    setKeyError(undefined);
+    try {
+      await enableKeyUnlock(keyPassphrase);
+      setKeyUnlock(true);
+      setKeyPassphrase("");
+    } catch (err) {
+      setKeyError(err instanceof Error ? err.message : "failed to set up the security key");
+    } finally {
+      setKeyWorking(false);
+    }
+  }
+
+  function handleDisableKeyUnlock() {
+    disableKeyUnlock();
+    setKeyUnlock(false);
   }
 
   async function handleExportBackup() {
@@ -221,6 +246,37 @@ export function Settings({ account, onBack }: SettingsProps) {
         )}
         {error && <p role="alert">{error}</p>}
       </section>
+
+      {enabled && isKeyUnlockSupported() && (
+        <section className="panel stack">
+          <h2>Unlock with a security key</h2>
+          {keyUnlock ? (
+            <div className="row">
+              <span data-testid="key-unlock-status">On</span>
+              <button className="danger" onClick={handleDisableKeyUnlock}>
+                Remove
+              </button>
+            </div>
+          ) : (
+            <div className="stack">
+              <input
+                type="password"
+                placeholder="Current passphrase"
+                value={keyPassphrase}
+                onChange={(e) => setKeyPassphrase(e.target.value)}
+                disabled={keyWorking}
+              />
+              <button onClick={handleEnableKeyUnlock} disabled={!keyPassphrase || keyWorking}>
+                {keyWorking ? "Waiting for the key..." : "Set up security key"}
+              </button>
+            </div>
+          )}
+          <p className="hint">
+            A security key, or this device's fingerprint, face or PIN, can then open UmbraChat; the passphrase keeps working. Whoever can pass that check can open the app, so a weak device PIN weakens it, and a passkey may be synced to your Apple, Google or Microsoft account.
+          </p>
+          {keyError && <p role="alert">{keyError}</p>}
+        </section>
+      )}
 
       <section className="panel stack">
         <h2>Backup</h2>

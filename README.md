@@ -15,7 +15,7 @@ Web client (PWA) and Rust server, with the Signal protocol (PQXDH + Double Ratch
 - 1:1 text messages, file sharing, disappearing messages, self-destructing files
 - Groups
 - Voice and video calls (WebRTC, optional relay for hard networks)
-- Several linked devices per account (each account's device list is signed by its own devices, so the server cannot add or hide one), encrypted local storage, encrypted backup export and restore
+- Several linked devices per account (each account's device list is signed by its own devices, so the server cannot add or hide one), encrypted local storage (unlocked with a passphrase, or also with a security key or the device's own lock where the browser and authenticator support WebAuthn PRF), encrypted backup export and restore
 - Web Push notifications, nicknames, typing indicator, screenshot detection
 
 No native iOS or Android apps yet.
@@ -52,7 +52,7 @@ The first build compiles Rust and WebAssembly and takes several minutes. Open `S
 | `SITE_ADDRESS` | no (`http://localhost`) | Domain served by Caddy, TLS is automatic |
 | `POSTGRES_PASSWORD` | yes | Database password, hex only |
 | `VAPID_PRIVATE_KEY` | yes | Web Push signing key (server); the matching public key is served at `/v1/push-key` |
-| `MESSAGE_TTL_DAYS` | no (`30`) | Days an undelivered message is kept before it is dropped |
+| `MESSAGE_TTL_DAYS` | no (`30`) | Days an undelivered message is kept before it is dropped. Apps keep a replaced signed prekey for 30 days, so above 30 a first message that waited longer than that after its recipient's weekly prekey rotation can no longer be read |
 | `TURN_URLS`, `TURN_SECRET` | no | Call relay, see below |
 | `TURN_REALM`, `TURN_EXTERNAL_IP` | with the relay | coturn settings |
 | `VITE_STUN_URL` | no | STUN server when you run no relay |
@@ -127,6 +127,8 @@ It does see, and could be compelled to hand over, who has an account, how many d
 
 - **You trust whoever serves the web app.** A web client cannot prove the JavaScript it runs is the audited one: a compromised or coerced operator could serve a modified bundle that leaks keys. This is the central weakness of any web messenger.
 - Each account has a signed device list: a chain of statements, each signed by a device that was in the one before. Your client keeps the last list it verified for every contact, trusting the first one it sees (like a first key) and accepting only valid continuations after that. It sends only to the devices in that list, uses only the key listed for each, and refuses (and shows you a notice about) a message from a device that is not in it: there is no "accept anyway". Every message carries the sender's list version and head, so a server that withholds a newer list, such as the removal of a stolen device, is exposed by the sender's own next message. A new device of your own account is accepted by comparing a number shown on both devices; any remaining device may remove a lost one, and without another device or an exported backup a lost account is lost. Limits: the first list you see for someone is trusted as is unless you started from their invite (below); a stolen device can race to remove your legitimate ones before you react; a server can still drop messages, and show different people different lists until a message of the sender's exposes it.
+- Each device replaces its signed prekeys weekly and forgets a replaced pair 30 days later, so a key stolen later cannot open old first messages; the identity key itself never changes, and one-time prekeys are not replenished once used (a first message then relies on the signed prekeys alone).
+- Unlocking with a security key or the device's lock is as strong as that check: whoever passes it (including with the device PIN) opens the app, and a passkey may be synced to the platform account. It was tested against Chromium's virtual authenticator, not on real hardware.
 - Web Push goes through your browser vendor's push service (Google, Mozilla or Apple), which learns when a device has a queued message, never its content. Users can leave notifications off.
 - iOS Safari may evict a PWA's local data after about seven days without a visit, which destroys the keys on that device. Keep a backup export.
 - Message delivery and call signaling use 3-second polling, not push connections.

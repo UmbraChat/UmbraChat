@@ -2,22 +2,37 @@ import { useState } from "react";
 
 interface UnlockProps {
   onUnlock: (passphrase: string) => Promise<boolean>;
+  /** Present when this device registered a security key or its own lock for unlocking. */
+  onUnlockWithKey?: () => Promise<boolean>;
 }
 
-export function Unlock({ onUnlock }: UnlockProps) {
+export function Unlock({ onUnlock, onUnlockWithKey }: UnlockProps) {
   const [passphrase, setPassphrase] = useState("");
   const [working, setWorking] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [error, setError] = useState<string>();
 
   async function handleSubmit() {
     setWorking(true);
-    setFailed(false);
+    setError(undefined);
     try {
       const ok = await onUnlock(passphrase);
       if (!ok) {
-        setFailed(true);
+        setError("Wrong passphrase. Try again.");
         setPassphrase("");
       }
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function handleKey() {
+    if (!onUnlockWithKey) return;
+    setWorking(true);
+    setError(undefined);
+    try {
+      if (!(await onUnlockWithKey())) setError("That security key does not open this app. Use your passphrase.");
+    } catch (err) {
+      setError(`Security key unlock failed (${err instanceof Error ? err.message : "cancelled"}). Use your passphrase.`);
     } finally {
       setWorking(false);
     }
@@ -39,7 +54,12 @@ export function Unlock({ onUnlock }: UnlockProps) {
         <button onClick={handleSubmit} disabled={working || !passphrase}>
           {working ? "Unlocking..." : "Unlock"}
         </button>
-        {failed && <p role="alert">Wrong passphrase. Try again.</p>}
+        {onUnlockWithKey && (
+          <button className="secondary" onClick={handleKey} disabled={working}>
+            Unlock with security key
+          </button>
+        )}
+        {error && <p role="alert">{error}</p>}
       </section>
     </main>
   );

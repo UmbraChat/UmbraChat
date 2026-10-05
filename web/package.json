@@ -37,7 +37,9 @@
     "e2e:hostile-input": "node e2e-hostile-input.mjs",
     "e2e:device-list": "node e2e-device-list.mjs",
     "e2e:device-chain": "node e2e-device-chain.mjs",
-    "e2e:invite": "node e2e-invite.mjs"
+    "e2e:invite": "node e2e-invite.mjs",
+    "e2e:prekey-rotation": "node e2e-prekey-rotation.mjs",
+    "e2e:key-unlock": "node e2e-key-unlock.mjs"
   },
   "dependencies": {
     "react": "^19.2.7",

@@ -69,14 +69,48 @@ struct PrekeyIn {
     private_key: Vec<u8>,
 }
 
+/// A rotated pair of signed prekeys, with when it was generated (milliseconds since the epoch).
+#[derive(Deserialize)]
+struct SignedPrekeyPairIn {
+    signed_prekey: SignedPrekeyIn,
+    kyber_signed_prekey: SignedPrekeyIn,
+    #[serde(default)]
+    created_at: u64,
+}
+
 #[derive(Deserialize)]
 struct LocalIdentity {
     identity_public_key: Vec<u8>,
     identity_private_key: Vec<u8>,
     registration_id: u32,
+    /// The pair the server currently serves.
     signed_prekey: SignedPrekeyIn,
     kyber_signed_prekey: SignedPrekeyIn,
+    /// Absent on identities made before rotation existed.
+    #[serde(default)]
+    prekeys_created_at: u64,
+    /// Generated, upload not confirmed yet: the server may already serve it.
+    #[serde(default)]
+    pending_prekeys: Option<SignedPrekeyPairIn>,
+    /// Replaced pairs, kept so first messages built against them still decrypt.
+    #[serde(default)]
+    retired_prekeys: Vec<SignedPrekeyPairIn>,
     one_time_prekeys: Vec<PrekeyIn>,
+}
+
+fn save_signed_prekeys(inner: &mut InMemSignalProtocolStore, signed: &SignedPrekeyIn, kyber: &SignedPrekeyIn, created_at: u64) -> Result<(), JsValue> {
+    let created_at = Timestamp::from_epoch_millis(created_at);
+
+    let signed_key_pair = KeyPair::from_public_and_private(&signed.public_key, &signed.private_key).map_err(js_err)?;
+    let signed_id = SignedPreKeyId::from(signed.key_id);
+    let signed_record = SignedPreKeyRecord::new(signed_id, created_at, &signed_key_pair, &signed.signature);
+    block_on(inner.signed_pre_key_store.save_signed_pre_key(signed_id, &signed_record)).map_err(js_err)?;
+
+    let kyber_key_pair = kem::KeyPair::from_public_and_private(&kyber.public_key, &kyber.private_key).map_err(js_err)?;
+    let kyber_id = KyberPreKeyId::from(kyber.key_id);
+    let kyber_record = KyberPreKeyRecord::new(kyber_id, created_at, &kyber_key_pair, &kyber.signature);
+    block_on(inner.kyber_pre_key_store.save_kyber_pre_key(kyber_id, &kyber_record)).map_err(js_err)?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -121,20 +155,12 @@ impl SignalStore {
 
         let mut inner = InMemSignalProtocolStore::new(identity_key_pair, local.registration_id).map_err(js_err)?;
 
-        // ponytail: record timestamp is a placeholder (0), not the real registration
-        // time - this bundle doesn't carry one, and nothing here reads it yet. Track
-        // the real value once prekey rotation/expiry policy needs to compare ages.
-        let signed_key_pair =
-            KeyPair::from_public_and_private(&local.signed_prekey.public_key, &local.signed_prekey.private_key).map_err(js_err)?;
-        let signed_id = SignedPreKeyId::from(local.signed_prekey.key_id);
-        let signed_record = SignedPreKeyRecord::new(signed_id, Timestamp::from_epoch_millis(0), &signed_key_pair, &local.signed_prekey.signature);
-        block_on(inner.signed_pre_key_store.save_signed_pre_key(signed_id, &signed_record)).map_err(js_err)?;
-
-        let kyber_key_pair = kem::KeyPair::from_public_and_private(&local.kyber_signed_prekey.public_key, &local.kyber_signed_prekey.private_key)
-            .map_err(js_err)?;
-        let kyber_id = KyberPreKeyId::from(local.kyber_signed_prekey.key_id);
-        let kyber_record = KyberPreKeyRecord::new(kyber_id, Timestamp::from_epoch_millis(0), &kyber_key_pair, &local.kyber_signed_prekey.signature);
-        block_on(inner.kyber_pre_key_store.save_kyber_pre_key(kyber_id, &kyber_record)).map_err(js_err)?;
+        // Every pair a first message may name: the served one, one whose upload is unconfirmed,
+        // and the retired ones still kept.
+        save_signed_prekeys(&mut inner, &local.signed_prekey, &local.kyber_signed_prekey, local.prekeys_created_at)?;
+        for pair in local.pending_prekeys.iter().chain(&local.retired_prekeys) {
+            save_signed_prekeys(&mut inner, &pair.signed_prekey, &pair.kyber_signed_prekey, pair.created_at)?;
+        }
 
         for prekey in &local.one_time_prekeys {
             let key_pair = KeyPair::from_public_and_private(&prekey.public_key, &prekey.private_key).map_err(js_err)?;
@@ -144,6 +170,13 @@ impl SignalStore {
         }
 
         Ok(SignalStore { inner })
+    }
+
+    /// Adds a newly generated pair of signed prekeys to this running store, so a first message
+    /// built against it decrypts before the next page load rebuilds the store from storage.
+    pub fn add_signed_prekeys(&mut self, pair: JsValue) -> Result<(), JsValue> {
+        let pair: SignedPrekeyPairIn = serde_wasm_bindgen::from_value(pair).map_err(js_err)?;
+        save_signed_prekeys(&mut self.inner, &pair.signed_prekey, &pair.kyber_signed_prekey, pair.created_at)
     }
 
     /// X3DH/PQXDH: establishes a session with `contact_id` from their prekey bundle.

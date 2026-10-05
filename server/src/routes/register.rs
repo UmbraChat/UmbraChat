@@ -83,6 +83,25 @@ pub struct DecodedBundle {
     pub one_time_prekeys: Vec<(i32, Vec<u8>)>,
 }
 
+/// Decodes a signed prekey (`kyber` for the post-quantum one) and checks that `identity_key`
+/// signed it. `field` names it in error messages. Shared by registration and rotation.
+pub fn decode_signed_prekey(identity_key: &IdentityKey, dto: &SignedPrekeyDto, field: &str, kyber: bool) -> Result<(Vec<u8>, Vec<u8>), ApiError> {
+    let public_key = STANDARD
+        .decode(&dto.public_key)
+        .map_err(|_| bad_request(&format!("{field}.public_key is not valid base64")))?;
+    let signature = STANDARD
+        .decode(&dto.signature)
+        .map_err(|_| bad_request(&format!("{field}.signature is not valid base64")))?;
+    let valid_key = if kyber { kem::PublicKey::deserialize(&public_key).is_ok() } else { PublicKey::deserialize(&public_key).is_ok() };
+    if !valid_key {
+        return Err(bad_request(&format!("{field}.public_key is not a valid key")));
+    }
+    if !identity_key.public_key().verify_signature(&public_key, &signature) {
+        return Err(bad_request(&format!("{field} signature does not verify against identity_public_key")));
+    }
+    Ok((public_key, signature))
+}
+
 pub fn validate_bundle(req: &RegisterRequest) -> Result<DecodedBundle, ApiError> {
     let identity_key_bytes = STANDARD
         .decode(&req.identity_public_key)
@@ -90,35 +109,8 @@ pub fn validate_bundle(req: &RegisterRequest) -> Result<DecodedBundle, ApiError>
     let identity_key = IdentityKey::decode(&identity_key_bytes)
         .map_err(|_| bad_request("identity_public_key is not a valid identity key"))?;
 
-    let signed_prekey_bytes = STANDARD
-        .decode(&req.signed_prekey.public_key)
-        .map_err(|_| bad_request("signed_prekey.public_key is not valid base64"))?;
-    let signature_bytes = STANDARD
-        .decode(&req.signed_prekey.signature)
-        .map_err(|_| bad_request("signed_prekey.signature is not valid base64"))?;
-
-    let signature_valid = identity_key
-        .public_key()
-        .verify_signature(&signed_prekey_bytes, &signature_bytes);
-    if !signature_valid {
-        return Err(bad_request(
-            "signed_prekey signature does not verify against identity_public_key",
-        ));
-    }
-
-    let kyber_public_key_bytes = STANDARD
-        .decode(&req.kyber_signed_prekey.public_key)
-        .map_err(|_| bad_request("kyber_signed_prekey.public_key is not valid base64"))?;
-    let kyber_signature_bytes = STANDARD
-        .decode(&req.kyber_signed_prekey.signature)
-        .map_err(|_| bad_request("kyber_signed_prekey.signature is not valid base64"))?;
-    kem::PublicKey::deserialize(&kyber_public_key_bytes)
-        .map_err(|_| bad_request("kyber_signed_prekey.public_key is not a valid Kyber key"))?;
-    if !identity_key.public_key().verify_signature(&kyber_public_key_bytes, &kyber_signature_bytes) {
-        return Err(bad_request(
-            "kyber_signed_prekey signature does not verify against identity_public_key",
-        ));
-    }
+    let (signed_prekey_bytes, signature_bytes) = decode_signed_prekey(&identity_key, &req.signed_prekey, "signed_prekey", false)?;
+    let (kyber_public_key_bytes, kyber_signature_bytes) = decode_signed_prekey(&identity_key, &req.kyber_signed_prekey, "kyber_signed_prekey", true)?;
 
     if req.one_time_prekeys.len() > MAX_ONE_TIME_PREKEYS {
         return Err(bad_request("too many one_time_prekeys in a single registration"));

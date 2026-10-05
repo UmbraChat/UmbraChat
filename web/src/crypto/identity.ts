@@ -1,4 +1,4 @@
-import init, { generate_identity_bundle, sign_with_identity, verify_identity_signature } from "wasm-crypto";
+import init, { generate_identity_bundle, generate_signed_prekeys, sign_with_identity, verify_identity_signature } from "wasm-crypto";
 
 export interface PrekeyBundle {
   key_id: number;
@@ -10,14 +10,28 @@ export interface SignedPrekeyBundle extends PrekeyBundle {
   signature: number[];
 }
 
+/** A classic and a post-quantum signed prekey made together, `created_at` in ms. */
+export interface SignedPrekeyPair {
+  signed_prekey: SignedPrekeyBundle;
+  kyber_signed_prekey: SignedPrekeyBundle;
+  created_at: number;
+}
+
 export interface IdentityBundle {
   identity_public_key: number[];
   identity_private_key: number[];
   registration_id: number;
+  /** The pair the server serves in this device's bundle. */
   signed_prekey: SignedPrekeyBundle;
   // Post-quantum prekey, mandatory: libsignal-protocol's session establishment
   // uses PQXDH, not classic X3DH.
   kyber_signed_prekey: SignedPrekeyBundle;
+  /** When the served pair was made; absent on identities made before rotation (crypto/prekeyRotation.ts). */
+  prekeys_created_at?: number;
+  /** A new pair whose upload is not confirmed yet: the server may already serve it. */
+  pending_prekeys?: SignedPrekeyPair;
+  /** Replaced pairs, kept so first messages built against them still decrypt. */
+  retired_prekeys?: (SignedPrekeyPair & { retired_at: number })[];
   one_time_prekeys: PrekeyBundle[];
 }
 
@@ -30,7 +44,13 @@ export async function ensureInit(): Promise<void> {
 
 export async function generateIdentity(oneTimePrekeyCount = 10): Promise<IdentityBundle> {
   await ensureInit();
-  return generate_identity_bundle(oneTimePrekeyCount) as IdentityBundle;
+  return { ...(generate_identity_bundle(oneTimePrekeyCount) as IdentityBundle), prekeys_created_at: Date.now() };
+}
+
+export async function generateSignedPrekeys(identity: IdentityBundle, keyId: number): Promise<SignedPrekeyPair> {
+  await ensureInit();
+  const pair = generate_signed_prekeys(Uint8Array.from(identity.identity_private_key), keyId) as Omit<SignedPrekeyPair, "created_at">;
+  return { ...pair, created_at: Date.now() };
 }
 
 export async function signWithIdentity(privateKey: number[], message: Uint8Array): Promise<Uint8Array> {

@@ -47,6 +47,13 @@ export async function saveAccount(account: LocalAccount): Promise<void> {
   });
 }
 
+/** Runs `change` while no other read-modify-write of the account record runs, in this tab or
+ * another (prekey rotation, turning local encryption on or off): otherwise one would save over
+ * the other's result and could lose private keys the server still hands out. */
+export function withAccountLock<T>(change: () => Promise<T>): Promise<T> {
+  return navigator.locks ? navigator.locks.request("umbrachat-account", change) : change();
+}
+
 export async function loadSession(contactId: string): Promise<Uint8Array | undefined> {
   const db = await openDb();
   const raw = await new Promise<unknown>((resolve, reject) => {

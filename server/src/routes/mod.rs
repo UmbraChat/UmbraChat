@@ -29,6 +29,7 @@ pub fn router(pool: PgPool, vapid_private_key: String) -> Router {
     Router::new()
         .route("/v1/register", post(register::register))
         .route("/v1/devices/{id}/prekey-bundle", get(prekey_bundle::get_prekey_bundle))
+        .route("/v1/devices/{id}/signed-prekeys", post(prekey_bundle::replace_signed_prekeys))
         .route("/v1/devices/{id}/status", get(devices::device_status))
         .route(
             "/v1/devices/{id}/push-subscription",

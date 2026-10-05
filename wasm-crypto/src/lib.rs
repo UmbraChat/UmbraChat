@@ -38,6 +38,52 @@ pub struct IdentityBundle {
     one_time_prekeys: Vec<PrekeyOutput>,
 }
 
+#[derive(Serialize)]
+pub struct SignedPrekeyPair {
+    signed_prekey: SignedPrekeyOutput,
+    kyber_signed_prekey: SignedPrekeyOutput,
+}
+
+/// A classic and a post-quantum signed prekey under `key_id`, both signed by `identity`.
+fn signed_prekey_pair(identity: &PrivateKey, key_id: u32) -> Result<SignedPrekeyPair, JsValue> {
+    let mut rng = rand::rng();
+
+    let signed_prekey_pair = KeyPair::generate(&mut rng);
+    let signed_prekey_public = signed_prekey_pair.public_key.serialize();
+    let signature = identity
+        .calculate_signature(&signed_prekey_public, &mut rng)
+        .map_err(|e| JsValue::from_str(&format!("failed to sign prekey: {e}")))?;
+
+    let kyber_prekey_pair = kem::KeyPair::generate(kem::KeyType::Kyber1024, &mut rng);
+    let kyber_prekey_public = kyber_prekey_pair.public_key.serialize();
+    let kyber_signature = identity
+        .calculate_signature(&kyber_prekey_public, &mut rng)
+        .map_err(|e| JsValue::from_str(&format!("failed to sign kyber prekey: {e}")))?;
+
+    Ok(SignedPrekeyPair {
+        signed_prekey: SignedPrekeyOutput {
+            key_id,
+            public_key: signed_prekey_public.to_vec(),
+            private_key: signed_prekey_pair.private_key.serialize(),
+            signature: signature.to_vec(),
+        },
+        kyber_signed_prekey: SignedPrekeyOutput {
+            key_id,
+            public_key: kyber_prekey_public.to_vec(),
+            private_key: kyber_prekey_pair.secret_key.serialize().to_vec(),
+            signature: kyber_signature.to_vec(),
+        },
+    })
+}
+
+/// A new pair of signed prekeys for rotation, signed by the device's identity key.
+#[wasm_bindgen]
+pub fn generate_signed_prekeys(identity_private_key: Vec<u8>, key_id: u32) -> Result<JsValue, JsValue> {
+    let identity = PrivateKey::deserialize(&identity_private_key).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let pair = signed_prekey_pair(&identity, key_id)?;
+    serde_wasm_bindgen::to_value(&pair).map_err(|e| JsValue::from_str(&format!("serialization failed: {e}")))
+}
+
 /// Generates a fresh identity key pair, registration id, signed prekey (classic
 /// and post-quantum), and a batch of one-time prekeys, all locally. Private key
 /// material is included in the result and never leaves this call boundary
@@ -48,34 +94,7 @@ pub fn generate_identity_bundle(one_time_prekey_count: u32) -> Result<JsValue, J
 
     let identity = IdentityKeyPair::generate(&mut rng);
     let registration_id: u32 = rng.random_range(1..16384);
-
-    let signed_prekey_pair = KeyPair::generate(&mut rng);
-    let signed_prekey_public = signed_prekey_pair.public_key.serialize();
-    let signature = identity
-        .private_key()
-        .calculate_signature(&signed_prekey_public, &mut rng)
-        .map_err(|e| JsValue::from_str(&format!("failed to sign prekey: {e}")))?;
-
-    let signed_prekey = SignedPrekeyOutput {
-        key_id: 1,
-        public_key: signed_prekey_public.to_vec(),
-        private_key: signed_prekey_pair.private_key.serialize(),
-        signature: signature.to_vec(),
-    };
-
-    let kyber_prekey_pair = kem::KeyPair::generate(kem::KeyType::Kyber1024, &mut rng);
-    let kyber_prekey_public = kyber_prekey_pair.public_key.serialize();
-    let kyber_signature = identity
-        .private_key()
-        .calculate_signature(&kyber_prekey_public, &mut rng)
-        .map_err(|e| JsValue::from_str(&format!("failed to sign kyber prekey: {e}")))?;
-
-    let kyber_signed_prekey = SignedPrekeyOutput {
-        key_id: 1,
-        public_key: kyber_prekey_public.to_vec(),
-        private_key: kyber_prekey_pair.secret_key.serialize().to_vec(),
-        signature: kyber_signature.to_vec(),
-    };
+    let SignedPrekeyPair { signed_prekey, kyber_signed_prekey } = signed_prekey_pair(identity.private_key(), 1)?;
 
     let mut one_time_prekeys = Vec::with_capacity(one_time_prekey_count as usize);
     for key_id in 1..=one_time_prekey_count {

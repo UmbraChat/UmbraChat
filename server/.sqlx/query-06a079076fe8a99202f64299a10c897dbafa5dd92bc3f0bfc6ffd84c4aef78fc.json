@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kyber_signed_prekeys SET key_id = $2, public_key = $3, signature = $4 WHERE device_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "06a079076fe8a99202f64299a10c897dbafa5dd92bc3f0bfc6ffd84c4aef78fc"
+}

@@ -3,7 +3,7 @@ import type { SignalStore } from "wasm-crypto";
 import { generateIdentity, computeSafetyNumber } from "./crypto/identity";
 import { loadAccount, saveAccount, type LocalAccount } from "./storage/keyStore";
 import { importBackup } from "./crypto/backup";
-import { isEncryptionEnabled, isVaultActive, unlock } from "./crypto/vault";
+import { isEncryptionEnabled, isKeyUnlockEnabled, isVaultActive, unlock, unlockWithKey } from "./crypto/vault";
 import { loadMessages, type ChatMessage } from "./storage/messageStore";
 import { registerAccount } from "./api/register";
 import { completeLink } from "./api/devices";
@@ -27,6 +27,7 @@ import { loadTypingIndicatorEnabled } from "./storage/pushPrefsStore";
 import { startCall, acceptCall, declineCall, hangUp, handleCallSignal, subscribeToCallState, getCallState, type CallState } from "./chat/call";
 import { createGroup, sendGroupText, removeMember, handleGroupSignal, loadAllGroups, type Group } from "./chat/group";
 import { openStore } from "./crypto/session";
+import { rotateSignedPrekeysIfDue } from "./crypto/prekeyRotation";
 import { loadGroup } from "./storage/groupStore";
 import { CreateAccount } from "./screens/CreateAccount";
 import { SafetyNumber } from "./screens/SafetyNumber";
@@ -47,6 +48,8 @@ import { Unlock } from "./screens/Unlock";
 const ACTIVE_CONTACT_KEY = "umbrachat:activeContactId";
 const POLL_INTERVAL_MS = 3000;
 const CALL_POLL_INTERVAL_MS = 500;
+// Rotation itself is due weekly (crypto/prekeyRotation.ts); checking is a local date comparison.
+const PREKEY_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 function isRinging(callState: CallState): boolean {
   return callState.status === "outgoing-ringing" || callState.status === "incoming-ringing";
@@ -104,6 +107,13 @@ function App() {
   useEffect(() => {
     if (signedIn) loadTrustState().catch((err) => console.error("loadTrustState failed:", err));
   }, [signedIn]);
+  useEffect(() => {
+    if (!signedIn) return;
+    const rotate = () => void rotateSignedPrekeysIfDue().catch((err) => console.warn("prekey rotation failed, retrying later:", err));
+    rotate();
+    const timer = window.setInterval(rotate, PREKEY_CHECK_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [signedIn]);
 
   useEffect(() => {
     function onVisible() {
@@ -145,6 +155,12 @@ function App() {
 
   async function handleUnlock(passphrase: string): Promise<boolean> {
     const ok = await unlock(passphrase, loadAccount);
+    if (ok) await bootIntoAccount();
+    return ok;
+  }
+
+  async function handleUnlockWithKey(): Promise<boolean> {
+    const ok = await unlockWithKey(loadAccount);
     if (ok) await bootIntoAccount();
     return ok;
   }
@@ -499,7 +515,7 @@ function App() {
   if (state.status === "locked") {
     return (
       <div className="app-shell">
-        <Unlock onUnlock={handleUnlock} />
+        <Unlock onUnlock={handleUnlock} onUnlockWithKey={isKeyUnlockEnabled() ? handleUnlockWithKey : undefined} />
       </div>
     );
   }

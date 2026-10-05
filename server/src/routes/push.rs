@@ -1,9 +1,10 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Extension,
+    Extension, Json,
 };
-use serde::Deserialize;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -22,6 +23,19 @@ pub struct SubscriptionKeysIn {
 pub struct RegisterSubscriptionRequest {
     pub endpoint: String,
     pub keys: SubscriptionKeysIn,
+}
+
+#[derive(Serialize)]
+pub struct PushKeyResponse {
+    pub public_key: String,
+}
+
+/// The public half of this server's VAPID key, which a browser needs to subscribe to its
+/// push service. Served by the server itself so a client that is not built for one particular
+/// server (it asks the user which one to use) can still enable notifications. Public by design.
+pub async fn push_public_key(Extension(vapid_private_key): Extension<Arc<String>>) -> Result<Json<PushKeyResponse>, ApiError> {
+    let builder = VapidSignatureBuilder::from_base64_no_sub(&vapid_private_key).map_err(|_| server_error())?;
+    Ok(Json(PushKeyResponse { public_key: URL_SAFE_NO_PAD.encode(builder.get_public_key()) }))
 }
 
 /// A device may only manage its own subscription - there's no "someone else's

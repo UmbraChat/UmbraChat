@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM messages WHERE recipient_device_id = $1 RETURNING sender_account_id, sender_device_id, ciphertext, created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sender_account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "sender_account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "sender_device_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "sender_device_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "ciphertext"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "73ea970eec4a93d62473b38295065ebc0e12f0abb3a5cf4554bf8e8d9cd49888"
+}

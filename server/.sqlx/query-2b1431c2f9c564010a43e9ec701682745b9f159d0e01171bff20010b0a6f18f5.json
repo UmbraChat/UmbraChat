@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT version, bytes, signature FROM device_list_statements WHERE account_id = $1 AND version > $2 ORDER BY version",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "device_list_statements",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "bytes",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "device_list_statements",
+            "name": "bytes"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "signature",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "device_list_statements",
+            "name": "signature"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2b1431c2f9c564010a43e9ec701682745b9f159d0e01171bff20010b0a6f18f5"
+}

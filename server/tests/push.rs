@@ -1,20 +1,8 @@
 mod common;
 
-use common::{app, cleanup_account, register_account, request, sign};
+use common::{accept, app, auth_headers, as_refs, cleanup_account, like, link_pending, register_account, request, sign, signed_statement, submit};
 use serde_json::json;
 use umbrachat_server::db;
-
-fn auth_headers(device_id: uuid::Uuid, timestamp: String, signature: String) -> Vec<(String, String)> {
-    vec![
-        ("x-device-id".to_string(), device_id.to_string()),
-        ("x-timestamp".to_string(), timestamp),
-        ("x-signature".to_string(), signature),
-    ]
-}
-
-fn as_refs(headers: &[(String, String)]) -> Vec<(&str, &str)> {
-    headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
-}
 
 fn subscription_body(endpoint: &str) -> serde_json::Value {
     json!({
@@ -111,17 +99,27 @@ async fn unlinking_a_device_also_removes_its_push_subscription() {
         .await
         .unwrap()
         .unwrap_or(0);
-    assert_eq!(before, 1, "subscription should exist before unlinking");
+    assert_eq!(before, 1, "subscription should exist before the removal");
 
-    // unlink_device only checks the caller's account matches the target
-    // device's account, not "not self" - a device unlinking itself is allowed.
-    let unlink_path = format!("/v1/devices/{}", primary.device_id);
-    let (u_ts, u_sig) = sign(&primary.identity, "DELETE", &unlink_path, b"");
-    let u_headers = auth_headers(primary.device_id, u_ts, u_sig);
-    let (unlink_status, _body) = request(&app, "DELETE", &unlink_path, &as_refs(&u_headers), json!(null)).await;
-    assert_eq!(unlink_status, axum::http::StatusCode::NO_CONTENT);
+    // A device removed by a signed statement takes its subscription with it.
+    let (second, second_identity) = link_pending(&app, &primary, "Second").await;
+    let head = accept(&app, &primary, second, &second_identity).await;
+    let sub_path2 = format!("/v1/devices/{second}/push-subscription");
+    let body2 = subscription_body("https://example.com/push/second");
+    let (ts2, sig2) = sign(&second_identity, "POST", &sub_path2, &serde_json::to_vec(&body2).unwrap());
+    let h2 = auth_headers(second, ts2, sig2);
+    request(&app, "POST", &sub_path2, &as_refs(&h2), body2).await;
+    let (statement, _) = signed_statement(primary.account_id, primary.chain_version + 2, head, &[(primary.device_id, &primary.identity)], (primary.device_id, &primary.identity));
+    let (unlink_status, _body) = submit(&app, primary.account_id, &like(&primary), &statement).await;
+    assert_eq!(unlink_status, axum::http::StatusCode::CREATED);
 
-    let after: i64 = sqlx::query_scalar!("SELECT count(*) FROM push_subscriptions WHERE device_id = $1", primary.device_id)
+    let primary_left: i64 = sqlx::query_scalar!("SELECT count(*) FROM push_subscriptions WHERE device_id = $1", primary.device_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .unwrap_or(0);
+    assert_eq!(primary_left, 1, "the device that stays keeps its subscription");
+    let after: i64 = sqlx::query_scalar!("SELECT count(*) FROM push_subscriptions WHERE device_id = $1", second)
         .fetch_one(&pool)
         .await
         .unwrap()

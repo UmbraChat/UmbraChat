@@ -35,7 +35,7 @@ async fn verify(
 
     let signature_bytes = STANDARD.decode(signature_header).map_err(|_| unauthorized("invalid X-Signature"))?;
 
-    let public_key_bytes = sqlx::query_scalar!("SELECT public_key FROM identity_keys WHERE device_id = $1", device_id)
+    let public_key_bytes = sqlx::query_scalar!("SELECT ik.public_key FROM identity_keys ik JOIN devices d ON d.id = ik.device_id WHERE ik.device_id = $1 AND d.active", device_id)
         .fetch_optional(pool)
         .await
         .map_err(|_| server_error())?

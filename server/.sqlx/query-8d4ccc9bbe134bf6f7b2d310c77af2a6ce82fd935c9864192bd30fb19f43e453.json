@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO push_subscriptions (device_id, endpoint, p256dh, auth) VALUES ($1, $2, $3, $4)\n         ON CONFLICT (device_id) DO UPDATE SET endpoint = $2, p256dh = $3, auth = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8d4ccc9bbe134bf6f7b2d310c77af2a6ce82fd935c9864192bd30fb19f43e453"
+}

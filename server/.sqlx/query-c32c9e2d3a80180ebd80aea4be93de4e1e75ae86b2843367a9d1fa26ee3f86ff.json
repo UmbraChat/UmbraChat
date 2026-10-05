@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ik.public_key FROM devices d JOIN identity_keys ik ON ik.device_id = d.id WHERE d.id = $1 AND d.account_id = $2 AND NOT d.active",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "public_key",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "identity_keys",
+            "name": "public_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c32c9e2d3a80180ebd80aea4be93de4e1e75ae86b2843367a9d1fa26ee3f86ff"
+}

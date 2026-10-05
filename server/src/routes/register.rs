@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::device_list;
 use crate::error::{bad_request, server_error, ApiError};
 
 #[derive(Deserialize)]
@@ -30,6 +31,32 @@ pub struct RegisterRequest {
     // uses PQXDH rather than classic X3DH.
     pub kyber_signed_prekey: SignedPrekeyDto,
     pub one_time_prekeys: Vec<PrekeyDto>,
+}
+
+/// A signed device-list statement as it travels over HTTP.
+#[derive(Deserialize)]
+pub struct SignedStatementDto {
+    pub statement: String, // base64
+    pub signature: String, // base64
+}
+
+impl SignedStatementDto {
+    pub fn decode(&self) -> Result<(Vec<u8>, Vec<u8>), ApiError> {
+        let statement = STANDARD.decode(&self.statement).map_err(|_| bad_request("statement is not valid base64"))?;
+        let signature = STANDARD.decode(&self.signature).map_err(|_| bad_request("signature is not valid base64"))?;
+        Ok((statement, signature))
+    }
+}
+
+/// The ids are chosen by the client: they are inside the genesis statement it signs, which
+/// cannot be built before them.
+#[derive(Deserialize)]
+pub struct RegisterBody {
+    pub account_id: Uuid,
+    pub device_id: Uuid,
+    pub device_list: SignedStatementDto,
+    #[serde(flatten)]
+    pub bundle: RegisterRequest,
 }
 
 #[derive(Serialize)]
@@ -171,25 +198,39 @@ pub async fn insert_device_bundle(tx: &mut Transaction<'_, Postgres>, device_id:
 
 pub async fn register(
     State(pool): State<PgPool>,
-    Json(req): Json<RegisterRequest>,
+    Json(req): Json<RegisterBody>,
 ) -> Result<(StatusCode, Json<RegisterResponse>), ApiError> {
-    let bundle = validate_bundle(&req)?;
+    let bundle = validate_bundle(&req.bundle)?;
+
+    let (statement_bytes, statement_signature) = req.device_list.decode()?;
+    let chain = device_list::verify_next(None, &statement_bytes, &statement_signature).map_err(bad_request)?;
+    let first = &chain.devices[0];
+    if chain.account_id != req.account_id || first.device_id != req.device_id || first.identity_key != bundle.identity_key_bytes {
+        return Err(bad_request("the device list does not match this registration"));
+    }
 
     let mut tx = pool.begin().await.map_err(|_| server_error())?;
 
-    let account_id = sqlx::query_scalar!("INSERT INTO accounts DEFAULT VALUES RETURNING id")
-        .fetch_one(&mut *tx)
+    sqlx::query!("INSERT INTO accounts (id) VALUES ($1)", req.account_id)
+        .execute(&mut *tx)
         .await
-        .map_err(|_| server_error())?;
+        .map_err(|e| match e {
+            sqlx::Error::Database(db) if db.is_unique_violation() => bad_request("account id already in use"),
+            _ => server_error(),
+        })?;
 
-    let device_id = sqlx::query_scalar!("INSERT INTO devices (account_id, label) VALUES ($1, 'Primary') RETURNING id", account_id)
-        .fetch_one(&mut *tx)
+    sqlx::query!("INSERT INTO devices (id, account_id, label) VALUES ($1, $2, 'Primary')", req.device_id, req.account_id)
+        .execute(&mut *tx)
         .await
-        .map_err(|_| server_error())?;
+        .map_err(|e| match e {
+            sqlx::Error::Database(db) if db.is_unique_violation() => bad_request("device id already in use"),
+            _ => server_error(),
+        })?;
 
-    insert_device_bundle(&mut tx, device_id, &bundle).await?;
+    insert_device_bundle(&mut tx, req.device_id, &bundle).await?;
+    super::device_chain::insert_statement(&mut tx, chain.account_id, chain.version, &statement_bytes, &statement_signature).await?;
 
     tx.commit().await.map_err(|_| server_error())?;
 
-    Ok((StatusCode::CREATED, Json(RegisterResponse { account_id, device_id })))
+    Ok((StatusCode::CREATED, Json(RegisterResponse { account_id: req.account_id, device_id: req.device_id })))
 }

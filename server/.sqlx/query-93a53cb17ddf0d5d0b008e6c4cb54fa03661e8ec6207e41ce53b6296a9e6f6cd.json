@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO kyber_signed_prekeys (device_id, key_id, public_key, signature) VALUES ($1, $2, $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "93a53cb17ddf0d5d0b008e6c4cb54fa03661e8ec6207e41ce53b6296a9e6f6cd"
+}

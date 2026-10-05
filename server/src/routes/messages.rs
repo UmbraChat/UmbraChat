@@ -33,6 +33,14 @@ pub async fn send_message(
         .map_err(|_| server_error())?
         .ok_or_else(|| bad_request("unknown sender device"))?;
 
+    let recipient_active = sqlx::query_scalar!("SELECT active FROM devices WHERE id = $1", body.recipient_device_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| server_error())?;
+    if recipient_active != Some(true) {
+        return Err(bad_request("unknown recipient device"));
+    }
+
     let id = sqlx::query_scalar!(
         "INSERT INTO messages (sender_device_id, sender_account_id, recipient_device_id, ciphertext) VALUES ($1, $2, $3, $4) RETURNING id",
         sender_device_id,

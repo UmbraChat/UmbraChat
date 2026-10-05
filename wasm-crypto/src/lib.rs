@@ -1,4 +1,4 @@
-use libsignal_protocol::{kem, IdentityKeyPair, KeyPair, PrivateKey};
+use libsignal_protocol::{kem, IdentityKey, IdentityKeyPair, KeyPair, PrivateKey};
 use rand::Rng;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -109,4 +109,13 @@ pub fn sign_with_identity(identity_private_key: Vec<u8>, message: Vec<u8>) -> Re
         .calculate_signature(&message, &mut rng)
         .map_err(|e| JsValue::from_str(&format!("failed to sign: {e}")))?;
     Ok(signature.to_vec())
+}
+
+/// Checks a signature made by `sign_with_identity` against a serialized identity public key.
+/// A malformed key or signature is simply "not valid", never an error the caller could mistake for success.
+#[wasm_bindgen]
+pub fn verify_identity_signature(identity_public_key: Vec<u8>, message: Vec<u8>, signature: Vec<u8>) -> bool {
+    IdentityKey::decode(&identity_public_key)
+        .map(|key| key.public_key().verify_signature(&message, &signature))
+        .unwrap_or(false)
 }

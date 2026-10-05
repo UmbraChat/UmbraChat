@@ -1,6 +1,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+mod common;
+
 use http_body_util::BodyExt;
-use libsignal_protocol::{kem, IdentityKeyPair, KeyPair};
+use libsignal_protocol::{IdentityKeyPair, KeyPair};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 use umbrachat_server::{db, routes};
@@ -11,44 +13,8 @@ async fn app() -> axum::Router {
 }
 
 fn valid_register_body() -> Value {
-    let mut rng = rand::rng();
-    let identity = IdentityKeyPair::generate(&mut rng);
-    let signed_prekey = KeyPair::generate(&mut rng);
-    let one_time_prekey = KeyPair::generate(&mut rng);
-    let kyber_prekey = kem::KeyPair::generate(kem::KeyType::Kyber1024, &mut rng);
-
-    let signed_prekey_public = signed_prekey.public_key.serialize();
-    let signature = identity
-        .private_key()
-        .calculate_signature(&signed_prekey_public, &mut rng)
-        .expect("signing must succeed");
-
-    let kyber_prekey_public = kyber_prekey.public_key.serialize();
-    let kyber_signature = identity
-        .private_key()
-        .calculate_signature(&kyber_prekey_public, &mut rng)
-        .expect("signing must succeed");
-
-    json!({
-        "identity_public_key": STANDARD.encode(identity.identity_key().serialize()),
-        "registration_id": 1,
-        "signed_prekey": {
-            "key_id": 1,
-            "public_key": STANDARD.encode(&signed_prekey_public),
-            "signature": STANDARD.encode(&signature),
-        },
-        "kyber_signed_prekey": {
-            "key_id": 1,
-            "public_key": STANDARD.encode(&kyber_prekey_public),
-            "signature": STANDARD.encode(&kyber_signature),
-        },
-        "one_time_prekeys": [
-            {
-                "key_id": 1,
-                "public_key": STANDARD.encode(one_time_prekey.public_key.serialize()),
-            }
-        ],
-    })
+    let identity = IdentityKeyPair::generate(&mut rand::rng());
+    common::register_body(&identity, uuid::Uuid::new_v4(), uuid::Uuid::new_v4()).0
 }
 
 #[tokio::test]
@@ -62,6 +28,7 @@ async fn register_with_valid_bundle_returns_201() {
                 .method("POST")
                 .uri("/v1/register")
                 .header("content-type", "application/json")
+                .header(umbrachat_server::protocol::PROTOCOL_HEADER, umbrachat_server::protocol::PROTOCOL_VERSION.to_string())
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -98,6 +65,7 @@ async fn register_with_invalid_signature_returns_4xx_and_persists_nothing() {
                 .method("POST")
                 .uri("/v1/register")
                 .header("content-type", "application/json")
+                .header(umbrachat_server::protocol::PROTOCOL_HEADER, umbrachat_server::protocol::PROTOCOL_VERSION.to_string())
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -133,6 +101,7 @@ async fn register_with_invalid_kyber_signature_returns_4xx_and_persists_nothing(
                 .method("POST")
                 .uri("/v1/register")
                 .header("content-type", "application/json")
+                .header(umbrachat_server::protocol::PROTOCOL_HEADER, umbrachat_server::protocol::PROTOCOL_VERSION.to_string())
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -174,6 +143,7 @@ async fn register_with_too_many_one_time_prekeys_returns_4xx() {
                 .method("POST")
                 .uri("/v1/register")
                 .header("content-type", "application/json")
+                .header(umbrachat_server::protocol::PROTOCOL_HEADER, umbrachat_server::protocol::PROTOCOL_VERSION.to_string())
                 .body(axum::body::Body::from(body.to_string()))
                 .unwrap(),
         )

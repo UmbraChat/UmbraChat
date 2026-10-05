@@ -39,7 +39,7 @@ pub async fn get_prekey_bundle(
     AuthenticatedDevice(_caller): AuthenticatedDevice,
     Path(device_id): Path<Uuid>,
 ) -> Result<Json<PrekeyBundleResponse>, ApiError> {
-    let identity = sqlx::query!("SELECT public_key, registration_id FROM identity_keys WHERE device_id = $1", device_id)
+    let identity = sqlx::query!("SELECT ik.public_key, ik.registration_id FROM identity_keys ik JOIN devices d ON d.id = ik.device_id WHERE ik.device_id = $1 AND d.active", device_id)
         .fetch_optional(&pool)
         .await
         .map_err(|_| server_error())?

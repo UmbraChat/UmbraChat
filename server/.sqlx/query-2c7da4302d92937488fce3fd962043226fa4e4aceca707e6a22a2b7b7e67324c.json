@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO devices (id, account_id, label) VALUES ($1, $2, 'Primary')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2c7da4302d92937488fce3fd962043226fa4e4aceca707e6a22a2b7b7e67324c"
+}

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use libsignal_protocol::{
     kem, message_decrypt, message_encrypt, process_prekey_bundle, CiphertextMessage, DeviceId,
-    GenericSignedPreKey, IdentityKey, IdentityKeyPair, InMemSignalProtocolStore,
+    GenericSignedPreKey, IdentityKey, IdentityKeyPair, IdentityKeyStore, InMemSignalProtocolStore,
     KeyPair, KyberPreKeyId, KyberPreKeyRecord, KyberPreKeyStore, PreKeyBundle, PreKeyId,
     PreKeyRecord, PreKeyStore, PreKeySignalMessage, PrivateKey, ProtocolAddress, PublicKey,
     SessionRecord, SessionStore, SignalMessage, SignedPreKeyId, SignedPreKeyRecord, SignedPreKeyStore, Timestamp,
@@ -209,7 +209,31 @@ impl SignalStore {
     pub fn import_session(&mut self, contact_id: String, bytes: Vec<u8>) -> Result<(), JsValue> {
         let remote = address(&contact_id);
         let record = SessionRecord::deserialize(&bytes).map_err(js_err)?;
-        block_on(self.inner.session_store.store_session(&remote, &record)).map_err(js_err)
+        block_on(self.inner.session_store.store_session(&remote, &record)).map_err(js_err)?;
+        // The store is rebuilt from scratch on every page load, so a restored session must
+        // also re-pin its peer's identity: libsignal then refuses a different key for this
+        // address instead of silently trusting it as a first contact.
+        if let Some(key) = record.remote_identity_key_bytes().map_err(js_err)? {
+            let identity = IdentityKey::decode(&key).map_err(js_err)?;
+            block_on(self.inner.identity_store.save_identity(&remote, &identity)).map_err(js_err)?;
+        }
+        Ok(())
+    }
+
+    /// Pins `identity` (a key the user compared out of band) for `contact_id`, replacing any
+    /// previous pin, so the next session with that address is accepted with exactly this key.
+    pub fn trust_peer_identity(&mut self, contact_id: String, identity: Vec<u8>) -> Result<(), JsValue> {
+        let identity = IdentityKey::decode(&identity).map_err(js_err)?;
+        block_on(self.inner.identity_store.save_identity(&address(&contact_id), &identity)).map_err(js_err)?;
+        Ok(())
+    }
+
+    /// The identity key currently pinned for `contact_id` (from an established or restored
+    /// session), for showing a fingerprint to compare out of band.
+    pub fn peer_identity(&self, contact_id: String) -> Result<Option<Vec<u8>>, JsValue> {
+        let remote = address(&contact_id);
+        let key = block_on(self.inner.identity_store.get_identity(&remote)).map_err(js_err)?;
+        Ok(key.map(|k| k.serialize().to_vec()))
     }
 
     /// Double Ratchet encrypt. The returned bytes are prefixed with a single
@@ -260,5 +284,18 @@ impl SignalStore {
             &mut rng,
         ))
         .map_err(js_err)
+    }
+}
+
+/// The sender identity key carried by a first message (type byte 3), without decrypting
+/// or trusting it - used to show the fingerprint of a key that was just refused.
+#[wasm_bindgen]
+pub fn prekey_message_identity(envelope: Vec<u8>) -> Result<Option<Vec<u8>>, JsValue> {
+    match envelope.split_first() {
+        Some((3, body)) => {
+            let message = PreKeySignalMessage::try_from(body).map_err(js_err)?;
+            Ok(Some(message.identity_key().serialize().to_vec()))
+        }
+        _ => Ok(None),
     }
 }

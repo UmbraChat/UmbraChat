@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ik.public_key, ik.registration_id FROM identity_keys ik JOIN devices d ON d.id = ik.device_id WHERE ik.device_id = $1 AND d.active",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "public_key",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "identity_keys",
+            "name": "public_key"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "registration_id",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "identity_keys",
+            "name": "registration_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "e8344a41d5ffda8827d9fe29ac727e010fcd21d677e0a6aaded017d9acfec280"
+}

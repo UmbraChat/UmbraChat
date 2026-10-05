@@ -66,6 +66,9 @@ export async function removeMember(groupId: string, memberAccountId: string, acc
  */
 export async function handleGroupSignal(envelope: GroupEnvelope, senderAccountId: string): Promise<void> {
   if (envelope.type === "group-invite") {
+    // An invite only creates a group. For a group already known it would replace the roster
+    // without the membership check below, so a removed member could put themselves back.
+    if (!envelope.memberAccountIds.includes(senderAccountId) || (await loadGroup(envelope.groupId))) return;
     await saveGroup({ id: envelope.groupId, name: envelope.name, memberAccountIds: envelope.memberAccountIds, createdAt: new Date().toISOString() });
     return;
   }

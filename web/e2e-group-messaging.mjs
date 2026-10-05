@@ -85,6 +85,23 @@ await alice.page.waitForTimeout(3500); // one more poll tick for carol, to be su
 const carolHasNewMessage = await carol.page.locator("text=carol left").count();
 check("carol (removed) never receives the post-removal message", carolHasNewMessage === 0, `count=${carolHasNewMessage}`);
 
+// A removed member cannot put herself back with an "invite" for the same group (it would replace
+// the roster without the membership check an update gets).
+const groupId = await carol.page.evaluate(async () => (await (await import("/src/storage/groupStore.ts")).loadAllGroups())[0].id);
+await carol.page.evaluate(
+  async ({ groupId, members }) => {
+    const account = await (await import("/src/storage/keyStore.ts")).loadAccount();
+    const store = await (await import("/src/crypto/session.ts")).openStore(account.identity);
+    const { sendToContact } = await import("/src/chat/conversation.ts");
+    const invite = new TextEncoder().encode(JSON.stringify({ type: "group-invite", groupId, name: "Book Club", memberAccountIds: members }));
+    for (const id of members.filter((m) => m !== account.accountId)) await sendToContact(id, invite, account, store);
+  },
+  { groupId, members: [alice.accountId, bob.accountId, carol.accountId] },
+);
+await alice.page.waitForTimeout(4500); // more than one poll tick on both sides
+const rosters = [await alice.page.locator('[data-testid="group-member"]').count(), await bob.page.locator('[data-testid="group-member"]').count()];
+check("a removed member's invite for the same group does not put her back", rosters.join() === "2,2", `alice,bob=${rosters}`);
+
 await browser.close();
 
 const failed = checks.some((ok) => !ok);

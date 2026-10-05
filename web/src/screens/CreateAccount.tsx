@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Logo } from "./icons";
-import { DISTRIBUTION, SERVER_URL_REQUIRED, clearServerUrl, getStoredServerUrl, setServerUrl } from "../api/server";
+import { DISTRIBUTION, SERVER_URL_REQUIRED, getStoredServerUrl, setServerUrl } from "../api/server";
 
 const RELEASES_URL = "https://github.com/UmbraChat/UmbraChat/releases";
 
@@ -22,16 +22,12 @@ export function CreateAccount({ onCreate, onLink, onRestore, creating, error, li
   const [backupPassphrase, setBackupPassphrase] = useState("");
   const [server, setServer] = useState(getStoredServerUrl());
   const [serverError, setServerError] = useState<string>();
-  // An instance's own page uses that instance unless the user asks for another server.
-  const [otherServer, setOtherServer] = useState(SERVER_URL_REQUIRED || !!server);
 
   // Saves the server entered above before any request is made; false (with a message) if it is unusable.
+  // An instance's own page only ever talks to its own server: its policy blocks any other.
   function applyServer(): boolean {
+    if (!SERVER_URL_REQUIRED) return true;
     setServerError(undefined);
-    if (!server.trim() && !SERVER_URL_REQUIRED) {
-      clearServerUrl(); // back to the default: this site's own API, even if another was chosen before
-      return true;
-    }
     try {
       setServerUrl(server);
       return true;
@@ -78,31 +74,15 @@ export function CreateAccount({ onCreate, onLink, onRestore, creating, error, li
         </div>
       )}
 
-      {otherServer && (
+      {SERVER_URL_REQUIRED && (
         <div className="panel stack">
           <h2>Server</h2>
-          <p className="hint">
-            {SERVER_URL_REQUIRED
-              ? "Enter the address of your server. It relays your messages and sees who talks to whom, never what is said."
-              : "Your account will live on the server you enter here instead of this site's."}
-          </p>
+          <p className="hint">Enter the address of your server. It relays your messages and sees who talks to whom, never what is said.</p>
           <input placeholder="https://chat.example.org" aria-label="Server address" data-testid="server-input" value={server} onChange={(e) => setServer(e.target.value)} disabled={creating} />
           {serverError && (
             <p role="alert" data-testid="server-error">
               {serverError}
             </p>
-          )}
-          {!SERVER_URL_REQUIRED && (
-            <button
-              className="text-button"
-              onClick={() => {
-                setServer("");
-                setServerError(undefined);
-                setOtherServer(false);
-              }}
-            >
-              Use this site's server
-            </button>
           )}
         </div>
       )}
@@ -111,12 +91,9 @@ export function CreateAccount({ onCreate, onLink, onRestore, creating, error, li
         <button onClick={() => applyServer() && onCreate()} disabled={creating || serverMissing}>
           {creating ? "Creating..." : "Create Account"}
         </button>
-        {!otherServer && (
+        {!SERVER_URL_REQUIRED && (
           <p className="hint server-line" data-testid="instance-server">
-            Your account will live on this site's server, {window.location.host}.{" "}
-            <button className="text-button" onClick={() => setOtherServer(true)}>
-              Use another server
-            </button>
+            Your account will live on this site's server, {window.location.host}. For another server, <a href={RELEASES_URL}>install UmbraChat on your device</a>: its code then comes from you, not from that server's host.
           </p>
         )}
       </div>

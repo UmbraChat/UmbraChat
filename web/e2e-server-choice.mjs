@@ -1,11 +1,11 @@
 import { chromium } from "playwright";
-import { startChat, openTab } from "./ui-steps.mjs";
+import { startChat, openTab, unfold } from "./ui-steps.mjs";
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Needs the API on http://localhost:3000 and the dev server on :5173 (same-origin default, proxied).
+// Needs the API on http://localhost:3000 and the dev server on :5173 (an instance's page: same origin, proxied).
 // Also builds a copy of the app with VITE_REQUIRE_SERVER_URL=1 (no same-origin default) and serves
 // it on :5174 to check the "choose a server first" behaviour.
 const API = "http://localhost:3000";
@@ -34,55 +34,56 @@ async function newPage(origin) {
 }
 
 try {
-  // 1. Same-origin default build: it names its own server, and another can still be chosen.
-  const alice = await newPage("http://localhost:5173");
-  check("an instance's page says the account will live on that instance", (await text(alice.page, '[data-testid="instance-server"]')).includes("localhost:5173"));
-  check("and asks no server address up front", (await alice.page.locator('[data-testid="server-input"]').count()) === 0);
-  check("and shows no warning about a published page", (await alice.page.locator('[data-testid="hosted-notice"]').count()) === 0);
-  // The way back to this site's server, which also forgets a server chosen earlier on this device.
-  {
-    const back = await newPage("http://localhost:5173");
-    await back.page.evaluate(() => localStorage.setItem("umbrachat-server-url", "http://localhost:3000"));
-    await back.page.reload();
-    await back.page.click("text=Use this site's server");
-    check("going back hides the server field", (await back.page.locator('[data-testid="server-input"]').count()) === 0 && (await back.page.locator('[data-testid="instance-server"]').count()) === 1);
-    await back.page.click("text=Create Account");
-    await back.page.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
-    check("and the account is made on this site's server, not the one chosen before", back.requests.some((u) => u.startsWith("http://localhost:5173/v1/register")) && !back.requests.some((u) => u.startsWith(`${API}/v1/register`)));
-    await back.page.context().close();
+  // 1. An instance's own page talks only to its own server: no server field, a way to the installed app instead.
+  const bob = await newPage("http://localhost:5173");
+  check("an instance's page says the account will live on that instance", (await text(bob.page, '[data-testid="instance-server"]')).includes("localhost:5173"));
+  check("and asks no server address", (await bob.page.locator('[data-testid="server-input"]').count()) === 0);
+  check("and offers no other server, only the installed app", (await bob.page.locator("text=Use another server").count()) === 0 && (await bob.page.locator('[data-testid="instance-server"] a').getAttribute("href")).endsWith("/releases"));
+  check("and shows no warning about a published page", (await bob.page.locator('[data-testid="hosted-notice"]').count()) === 0);
+  // A server stored on this device earlier (when the option existed) is ignored: its policy would block it anyway.
+  await bob.page.evaluate((api) => localStorage.setItem("umbrachat-server-url", api), API);
+  await bob.page.reload();
+  await bob.page.click("text=Create Account");
+  await bob.page.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
+  const bobId = await text(bob.page, '[data-testid="account-id"]');
+  check("its account is made on its own server, never on a server stored earlier", bob.requests.some((u) => u.startsWith("http://localhost:5173/v1/register")) && !bob.requests.some((u) => u.startsWith(`${API}/v1/register`)));
+
+  // 2. The client built without a same-origin default must be told the server.
+  const alice = await newPage("http://localhost:5174");
+  const violations = [];
+  alice.page.on("console", (m) => m.text().includes("Content Security Policy") && violations.push(m.text()));
+  check("the build carries its own Content-Security-Policy", (await alice.page.content()).includes('http-equiv="Content-Security-Policy"'));
+  await alice.page.waitForSelector('[data-testid="server-input"]', { timeout: 10000 });
+  check("the generic build served from this device asks for a server without the published-page warning", (await alice.page.locator('[data-testid="hosted-notice"]').count()) === 0);
+  check("with no server chosen, creating an account is not possible", await alice.page.locator("button", { hasText: "Create Account" }).isDisabled());
+
+  // 3. Unusable addresses are refused before any request.
+  for (const input of ["javascript:alert(1)", "http://evil.example", "ftp://evil.example", "https://user:pw@evil.example"]) {
+    await alice.page.fill('[data-testid="server-input"]', input);
+    await alice.page.click("text=Create Account");
+    await alice.page.waitForSelector('[data-testid="server-error"]', { timeout: 5000 });
+    check(`refuses "${input}"`, true);
   }
-  await alice.page.click("text=Use another server");
+  check("and never contacted it", !alice.requests.some((u) => u.includes("evil.example") || u.includes("/v1/register")), alice.requests.join(" "));
+
   await alice.page.fill('[data-testid="server-input"]', API);
   await alice.page.click("text=Create Account");
   await alice.page.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
   const aliceId = await text(alice.page, '[data-testid="account-id"]');
-  check("a chosen server receives the requests directly", alice.requests.some((u) => u.startsWith(`${API}/v1/register`)), alice.requests.filter((u) => u.includes("/v1/")).join(" "));
-  check("none go through this page's own origin", !alice.requests.some((u) => u.startsWith("http://localhost:5173/v1/")));
+  check("once a server is entered it receives the requests directly", alice.requests.some((u) => u.startsWith(`${API}/v1/register`)), alice.requests.filter((u) => u.includes("/v1/")).join(" "));
+  check("and none go through the app's own host", !alice.requests.some((u) => u.startsWith("http://localhost:5174/v1/")));
+  check("and nothing it needs is blocked by its policy", violations.length === 0, violations.join(" | "));
 
-  // 2. Someone on the default (same-origin) server can talk to them: same database behind both.
-  const bob = await newPage("http://localhost:5173");
-  await bob.page.click("text=Create Account");
-  await bob.page.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
-  await startChat(alice.page, await text(bob.page, '[data-testid="account-id"]'));
+  // 4. Someone on the instance's page can talk to them: same database behind both.
+  await startChat(alice.page, bobId);
   await alice.page.waitForSelector('input[placeholder="Type a message..."]', { timeout: 15000 });
   await alice.page.fill('input[placeholder="Type a message..."]', "across origins");
   await alice.page.click('button[aria-label="Send"]');
   await startChat(bob.page, aliceId);
   await bob.page.waitForSelector('[data-testid="message-received"]:has-text("across origins")', { timeout: 20000 });
-  check("messages cross between a chosen server and the default one", true);
+  check("messages cross between the installed app and the instance's page", true);
 
-  // 3. Unusable addresses are refused before any request.
-  const bad = await newPage("http://localhost:5173");
-  await bad.page.click("text=Use another server");
-  for (const input of ["javascript:alert(1)", "http://evil.example", "ftp://evil.example", "https://user:pw@evil.example"]) {
-    await bad.page.fill('[data-testid="server-input"]', input);
-    await bad.page.click("text=Create Account");
-    await bad.page.waitForSelector('[data-testid="server-error"]', { timeout: 5000 });
-    check(`refuses "${input}"`, true);
-  }
-  check("and never contacted it", !bad.requests.some((u) => u.includes("evil.example") || u.includes("/v1/register")), bad.requests.join(" "));
-
-  // 4. Settings shows the server and warns only when the app and the server share a host.
+  // 5. Settings shows the server and warns only when the app and the server share a host.
   await alice.page.click('button[aria-label="Back to menu"]');
   await openTab(alice.page, "settings");
   await alice.page.waitForSelector('[data-testid="server-url"]', { timeout: 10000 });
@@ -93,20 +94,19 @@ try {
   await bob.page.waitForSelector('[data-testid="server-url"]', { timeout: 10000 });
   check("same-host warning when the app and server share an origin", (await bob.page.locator('[data-testid="same-host-warning"]').count()) === 1);
 
-  // 5. The client built without a same-origin default must be told the server.
-  const generic = await newPage("http://localhost:5174");
-  const violations = [];
-  generic.page.on("console", (m) => m.text().includes("Content Security Policy") && violations.push(m.text()));
-  check("the build carries its own Content-Security-Policy", (await generic.page.content()).includes('http-equiv="Content-Security-Policy"'));
-  await generic.page.waitForSelector('[data-testid="server-input"]', { timeout: 10000 });
-  check("the generic build served from this device asks for a server without the published-page warning", (await generic.page.locator('[data-testid="hosted-notice"]').count()) === 0);
-  check("with no server chosen, creating an account is not possible", await generic.page.locator("button", { hasText: "Create Account" }).isDisabled());
-  await generic.page.fill('[data-testid="server-input"]', API);
-  await generic.page.click("text=Create Account");
-  await generic.page.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
-  check("once a server is entered it works", true);
-  check("and nothing it needs is blocked by that policy", violations.length === 0, violations.join(" | "));
-  check("and never calls its own host's API", !generic.requests.some((u) => u.startsWith("http://localhost:5174/v1/")), generic.requests.filter((u) => u.includes("/v1/")).join(" "));
+  // A backup of an account on another server is refused by an instance's page instead of stranding it there.
+  await alice.page.fill('input[placeholder="Passphrase"]', "backup-passphrase");
+  const downloading = alice.page.waitForEvent("download");
+  await alice.page.click("text=Export Backup");
+  const backupPath = join(mkdtempSync(join(tmpdir(), "umbra-backup-")), "backup.json");
+  await (await downloading).saveAs(backupPath);
+  const restorer = await newPage("http://localhost:5173");
+  await unfold(restorer.page, "Lost your device?");
+  await restorer.page.setInputFiles('input[aria-label="Backup file"]', backupPath);
+  await restorer.page.fill('input[placeholder="Backup passphrase"]', "backup-passphrase");
+  await restorer.page.click("text=Restore from Backup");
+  await restorer.page.waitForSelector('[role="alert"]', { timeout: 15000 });
+  check("an instance's page refuses a backup from another server", (await text(restorer.page, '[role="alert"]')).includes(API) && (await restorer.page.locator('[data-testid="account-id"]').count()) === 0, await text(restorer.page, '[role="alert"]'));
 
   // 6. The same build served by another host (a published page) says who serves it.
   const hosted = await (await browser.newContext()).newPage();

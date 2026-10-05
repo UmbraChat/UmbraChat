@@ -36,9 +36,9 @@ export function getStoredServerUrl(): string {
   return readStored();
 }
 
-/** Base URL prepended to every API path: "" means same origin. */
+/** Base URL prepended to every API path: "" means same origin. An instance's build ignores any stored choice. */
 export function getServerUrl(): string {
-  return readStored() || (SERVER_URL_REQUIRED ? "" : BUILD_DEFAULT);
+  return SERVER_URL_REQUIRED ? readStored() : BUILD_DEFAULT;
 }
 
 export function apiUrl(path: string): string {
@@ -103,13 +103,9 @@ export function setServerUrl(input: string): void {
   }
 }
 
-/** Forgets the chosen server: an instance's own page then talks to its own API again. */
-export function clearServerUrl(): void {
-  try {
-    localStorage.removeItem(STORAGE_KEY);
-  } catch {
-    // Nothing stored to forget.
-  }
+/** The origin of the server this app talks to, also when that is its own. */
+export function currentServerOrigin(): string {
+  return getServerUrl() || window.location.origin;
 }
 
 /** True when the app and the API come from the same host, which can then change the app's code. */

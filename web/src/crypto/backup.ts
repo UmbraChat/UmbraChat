@@ -3,7 +3,7 @@ import { deriveKey, replaceBytes, restoreBytes } from "./vault";
 import { loadAccount, saveAccount, loadSession, saveSession, listSessionContactIds, type LocalAccount } from "../storage/keyStore";
 import { loadMessages, saveMessages, listMessageContactIds, type ChatMessage } from "../storage/messageStore";
 import { loadAllGroups, saveGroup, type Group } from "../storage/groupStore";
-import { getStoredServerUrl, setServerUrl } from "../api/server";
+import { SERVER_URL_REQUIRED, currentServerOrigin, setServerUrl } from "../api/server";
 
 const BACKUP_VERSION = 1;
 
@@ -23,7 +23,7 @@ async function gatherSnapshot(): Promise<Snapshot> {
   const messageIds = await listMessageContactIds();
   const messages = await Promise.all(messageIds.map(async (id) => [id, await loadMessages(id)] as const));
   const groups = await loadAllGroups();
-  return { account, sessions, messages, groups, serverUrl: getStoredServerUrl() || undefined };
+  return { account, sessions, messages, groups, serverUrl: currentServerOrigin() };
 }
 
 /**
@@ -71,7 +71,11 @@ export async function importBackup(file: File, passphrase: string): Promise<Loca
   const snapshot = restoreBytes(JSON.parse(new TextDecoder().decode(plaintext))) as Snapshot;
   if (!snapshot.account) throw new Error("backup file has no account in it");
 
-  if (snapshot.serverUrl) {
+  // An instance's page talks only to its own server: an account from another one would be stranded here.
+  if (!SERVER_URL_REQUIRED && snapshot.serverUrl && snapshot.serverUrl !== currentServerOrigin()) {
+    throw new Error(`this backup's account lives on ${snapshot.serverUrl}: restore it there, or in UmbraChat installed on your device`);
+  }
+  if (SERVER_URL_REQUIRED && snapshot.serverUrl) {
     try {
       setServerUrl(snapshot.serverUrl);
     } catch {

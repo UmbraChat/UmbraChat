@@ -9,7 +9,7 @@ function check(label, ok, detail) {
 
 function subscriptionRowCount(deviceId) {
   const out = execSync(
-    `podman exec -i umbrachat-postgres psql -U umbrachat -d umbrachat -tAc "select count(*) from push_subscriptions where device_id = '${deviceId}'"`,
+    `${process.env.DB_EXEC ?? "podman exec -i umbrachat-postgres"} psql -U ${process.env.DB_USER ?? "umbrachat"} -d ${process.env.DB_NAME ?? "umbrachat"} -tAc "select count(*) from push_subscriptions where device_id = '${deviceId}'"`,
   );
   return parseInt(out.toString().trim(), 10);
 }

@@ -3,6 +3,7 @@ import { deriveKey, replaceBytes, restoreBytes } from "./vault";
 import { loadAccount, saveAccount, loadSession, saveSession, listSessionContactIds, type LocalAccount } from "../storage/keyStore";
 import { loadMessages, saveMessages, listMessageContactIds, type ChatMessage } from "../storage/messageStore";
 import { loadAllGroups, saveGroup, type Group } from "../storage/groupStore";
+import { getStoredServerUrl, setServerUrl } from "../api/server";
 
 const BACKUP_VERSION = 1;
 
@@ -11,6 +12,8 @@ interface Snapshot {
   sessions: readonly (readonly [string, Uint8Array | undefined])[];
   messages: readonly (readonly [string, ChatMessage[]])[];
   groups: Group[];
+  /** The server this account lives on, when the user chose one (absent in older backups). */
+  serverUrl?: string;
 }
 
 async function gatherSnapshot(): Promise<Snapshot> {
@@ -20,7 +23,7 @@ async function gatherSnapshot(): Promise<Snapshot> {
   const messageIds = await listMessageContactIds();
   const messages = await Promise.all(messageIds.map(async (id) => [id, await loadMessages(id)] as const));
   const groups = await loadAllGroups();
-  return { account, sessions, messages, groups };
+  return { account, sessions, messages, groups, serverUrl: getStoredServerUrl() || undefined };
 }
 
 /**
@@ -68,6 +71,13 @@ export async function importBackup(file: File, passphrase: string): Promise<Loca
   const snapshot = restoreBytes(JSON.parse(new TextDecoder().decode(plaintext))) as Snapshot;
   if (!snapshot.account) throw new Error("backup file has no account in it");
 
+  if (snapshot.serverUrl) {
+    try {
+      setServerUrl(snapshot.serverUrl);
+    } catch {
+      /* an unusable address in the file: keep whatever the user entered */
+    }
+  }
   await saveAccount(snapshot.account);
   for (const [id, bytes] of snapshot.sessions) if (bytes) await saveSession(id, bytes);
   for (const [id, msgs] of snapshot.messages) await saveMessages(id, msgs);

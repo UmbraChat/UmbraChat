@@ -19,6 +19,7 @@ export function NewConversation({ onStart, starting, error }: NewConversationPro
         onChange={(e) => setContactId(e.target.value)}
         disabled={starting}
       />
+      <p className="hint">Or paste the invite your contact gave you: it authenticates them, which a plain id cannot.</p>
       <button onClick={() => onStart(contactId.trim())} disabled={starting || !contactId.trim()}>
         {starting ? "Starting..." : "Start Conversation"}
       </button>

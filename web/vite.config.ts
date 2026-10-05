@@ -11,9 +11,24 @@ import react from '@vitejs/plugin-react'
 // with `VITE_HTTPS=1 npm run dev -- --host`.
 const useHttps = process.env.VITE_HTTPS === '1' && existsSync('.certs/cert.pem') && existsSync('.certs/key.pem')
 
+// The Content-Security-Policy travels inside the build (a meta tag), so a copy served by any
+// static file server has it, not only the one behind deploy/Caddyfile (which sets the same
+// policy as a header, plus frame-ancestors, which a meta tag cannot carry). A build that
+// asks for its server at runtime must be allowed to reach any https server, and localhost.
+// Build only: the dev server needs inline scripts for hot reload.
+const connectSrc = process.env.VITE_REQUIRE_SERVER_URL === '1' ? "'self' https: http://localhost:* http://127.0.0.1:*" : "'self'"
+const csp = `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src ${connectSrc}; worker-src 'self'; object-src 'none'; base-uri 'none'`
+
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: 'content-security-policy',
+      apply: 'build',
+      transformIndexHtml: () => [{ tag: 'meta', attrs: { 'http-equiv': 'Content-Security-Policy', content: csp }, injectTo: 'head-prepend' }],
+    },
+  ],
   server: {
     fs: {
       // wasm-crypto is a sibling package (file: dependency, symlinked via

@@ -1,11 +1,15 @@
 import type { SignalStore } from "wasm-crypto";
 import type { LocalAccount } from "../storage/keyStore";
+import { prekey_message_identity } from "wasm-crypto";
 import { openStore, persistSession, restoreSession } from "../crypto/session";
+import { admitPeer, raiseNotice } from "../crypto/trust";
+import { headHex, pinnedChain, verifiedChain } from "../crypto/chains";
+import { ChainUnavailableError } from "../api/chain";
+import { holdForRetry, takeRetries } from "./retryQueue";
 import { fetchPrekeyBundle } from "../api/prekeyBundle";
-import { sendMessage, fetchMessages } from "../api/messages";
-import { listDevices } from "../api/devices";
+import { sendMessage, fetchMessages, type ReceivedMessage } from "../api/messages";
 import { toBase64, fromBase64 } from "../api/codec";
-import { loadMessages, saveMessages, type ChatMessage } from "../storage/messageStore";
+import { loadMessages, updateMessages, type ChatMessage } from "../storage/messageStore";
 
 interface TextEnvelope {
   type: "text";
@@ -108,7 +112,69 @@ export function isGroupEnvelope(envelope: Envelope): envelope is GroupEnvelope {
   return envelope.type === "group-invite" || envelope.type === "group-update" || envelope.type === "group-text";
 }
 
+/**
+ * Every envelope carries (version, head) of the sender's own device list as the sender last
+ * verified it. A receiver whose server shows an older list for that sender knows the server is
+ * holding something back (a removal, say), and one shown a different head at the same version
+ * knows it is being shown another list than the sender's.
+ */
+interface ChainStamp {
+  v: number;
+  h: string;
+}
+type Stamped = Envelope & { chain: ChainStamp };
+
 type Envelope = TextEnvelope | FileEnvelope | ReceiptEnvelope | FileOpenedEnvelope | TimerEnvelope | TypingEnvelope | CallEnvelope | GroupEnvelope;
+
+const MAX_TIMER_SECONDS = 366 * 24 * 3600;
+const isString = (v: unknown): v is string => typeof v === "string";
+const isSeconds = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= MAX_TIMER_SECONDS;
+const isIds = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 1000 && v.every(isString);
+
+/**
+ * Shape check on a decrypted envelope. The sender is another account, not necessarily a
+ * friend: a wrong type or an absurd number must be dropped here, not crash a later step
+ * (new Date(Infinity).toISOString() throws) or store garbage in the history.
+ */
+function isValidEnvelope(value: unknown): value is Stamped {
+  if (typeof value !== "object" || value === null) return false;
+  const e = value as Record<string, unknown>;
+  const stamp = e.chain as Record<string, unknown> | null | undefined;
+  if (typeof stamp !== "object" || stamp === null || !Number.isInteger(stamp.v) || (stamp.v as number) < 1 || !isString(stamp.h) || !/^[0-9a-f]{64}$/.test(stamp.h)) return false;
+  switch (e.type) {
+    case "text":
+      return isString(e.id) && isString(e.body);
+    case "file":
+      return (
+        isString(e.id) && isString(e.filename) && isString(e.mimeType) && isString(e.data) &&
+        typeof e.size === "number" && Number.isFinite(e.size) && (e.timerSeconds === undefined || isSeconds(e.timerSeconds))
+      );
+    case "delivered":
+    case "read":
+    case "file-opened":
+      return isString(e.refId);
+    case "timer":
+      return isSeconds(e.seconds);
+    case "typing":
+      return true;
+    case "call-offer":
+      return isString(e.callId) && isString(e.sdp) && (e.kind === "voice" || e.kind === "video");
+    case "call-answer":
+      return isString(e.callId) && isString(e.sdp);
+    case "call-ice":
+      return isString(e.callId) && typeof e.candidate === "object" && e.candidate !== null;
+    case "call-end":
+      return isString(e.callId) && isString(e.reason);
+    case "group-invite":
+      return isString(e.groupId) && isString(e.name) && isIds(e.memberAccountIds);
+    case "group-update":
+      return isString(e.groupId) && isIds(e.memberAccountIds);
+    case "group-text":
+      return isString(e.groupId) && isString(e.id) && isString(e.body);
+    default:
+      return false;
+  }
+}
 
 /** The composite session address a contact's specific device is addressed by.
  * `wasm-crypto` treats this as an opaque string name (its own device_id field
@@ -118,33 +184,78 @@ function sessionKey(contactAccountId: string, deviceId: string): string {
   return `${contactAccountId}:${deviceId}`;
 }
 
+const sameBytes = (a: ArrayLike<number>, b: ArrayLike<number>) => a.length === b.length && Array.from(a).every((v, i) => v === b[i]);
+
+/** Adds the sender's device-list stamp to an envelope about to be encrypted. */
+async function stamped(plaintext: Uint8Array, account: LocalAccount): Promise<Uint8Array> {
+  const own = await verifiedChain(account.accountId, account, OWN_CHAIN_MAX_AGE_MS);
+  let envelope: Record<string, unknown>;
+  try {
+    envelope = JSON.parse(new TextDecoder().decode(plaintext));
+  } catch {
+    return plaintext; // not an envelope at all: sent as is (only tests send such bytes, to see how a receiver copes)
+  }
+  envelope.chain = { v: own.version, h: headHex(own.head) } satisfies ChainStamp;
+  return new TextEncoder().encode(JSON.stringify(envelope));
+}
+
+// How old our view of our own list may be when stamping: seconds, not minutes, so a removal
+// done from another device is in the next message, without a request per message.
+const OWN_CHAIN_MAX_AGE_MS = 15000;
+
 /**
- * Fans an envelope out to every one of `contactId`'s current devices,
- * establishing a session with any device that doesn't have one yet.
- * Every send site in this module routes through here - one place that knows
- * how to reach "a contact," not one per envelope type. Re-fetches the device
- * list on every call rather than caching it, so a contact's newly linked
- * device is included in the very next send with no extra wiring.
+ * Fans an envelope out to every device in `contactId`'s signed device list, establishing a
+ * session with any device that has none yet. Every send site in this module routes through here.
+ * The list is the one verified against our pin (crypto/chains.ts), not the server's say-so: a
+ * device the server invents is not in it, and a device whose prekey bundle shows another key
+ * than the listed one is skipped.
  */
-export async function sendToContact(contactId: string, plaintext: Uint8Array, account: LocalAccount, store: SignalStore): Promise<void> {
-  const devices = await listDevices(contactId, account);
-  // list_devices returns an empty array rather than 404ing for an unknown
-  // account (see server/src/routes/devices.rs), so an empty list here would
-  // otherwise loop zero times and silently "succeed" without sending anything -
-  // a real regression from the old single-device flow, which validated the
-  // contact existed (via a 404) before any message could be typed.
-  if (devices.length === 0) throw new Error("this contact has no reachable devices");
-  for (const device of devices) {
-    const key = sessionKey(contactId, device.id);
+export function sendToContact(contactId: string, plaintext: Uint8Array, account: LocalAccount, store: SignalStore): Promise<void> {
+  // One send at a time per contact: a burst (a call's ICE candidates) would otherwise find "no
+  // session yet" all at once and each set up its own, scrambling the ratchet on both sides.
+  const run = (sendTails.get(contactId) ?? Promise.resolve()).then(() => deliver(contactId, plaintext, account, store));
+  const tail = run.catch(() => undefined);
+  sendTails.set(contactId, tail);
+  void tail.then(() => sendTails.get(contactId) === tail && sendTails.delete(contactId));
+  return run;
+}
+
+const sendTails = new Map<string, Promise<unknown>>();
+
+async function deliver(contactId: string, plaintext: Uint8Array, account: LocalAccount, store: SignalStore): Promise<void> {
+  let chain;
+  try {
+    chain = await verifiedChain(contactId, account);
+  } catch (err) {
+    if (err instanceof ChainUnavailableError) throw err;
+    throw new Error(`this contact has no usable signed device list: ${err instanceof Error ? err.message : err}`);
+  }
+  const body = await stamped(plaintext, account);
+  let reached = 0;
+  for (const device of chain.devices) {
+    const key = sessionKey(contactId, device.deviceId);
     await restoreSession(store, key);
     if (!store.has_session(key)) {
-      const bundle = await fetchPrekeyBundle(device.id, account);
+      const bundle = await fetchPrekeyBundle(device.deviceId, account);
+      if (!sameBytes(bundle.identity_public_key, device.identityKey)) {
+        await raiseNotice("key-mismatch", contactId, device.deviceId, bundle.identity_public_key);
+        continue;
+      }
       store.establish_session(key, bundle);
+    } else {
+      const pinned = store.peer_identity(key);
+      if (pinned && !sameBytes(pinned, device.identityKey)) {
+        await raiseNotice("key-changed", contactId, device.deviceId, pinned);
+        continue;
+      }
     }
-    const ciphertext = store.encrypt(key, plaintext);
-    await sendMessage(device.id, ciphertext, account);
+    const ciphertext = store.encrypt(key, body);
+    await sendMessage(device.deviceId, ciphertext, account);
     await persistSession(store, key);
+    reached++;
   }
+  // Every device being refused must not look like a successful send.
+  if (reached === 0) throw new Error("not sent: no device of this contact matches their signed device list, see the security alerts");
 }
 
 /** Sends a call-signaling envelope through the same encrypted pipe as everything else - never shown as a chat message. */
@@ -266,18 +377,17 @@ export async function sendText(contactId: string, text: string, account: LocalAc
   const envelope: TextEnvelope = { type: "text", id: crypto.randomUUID(), body: text };
   await sendToContact(contactId, new TextEncoder().encode(JSON.stringify(envelope)), account, store);
 
-  const messages = await loadMessages(contactId);
   const timerSeconds = getTimerSeconds(contactId);
-  messages.push({
-    id: envelope.id,
-    direction: "sent",
-    text,
-    status: "sent",
-    createdAt: new Date().toISOString(),
-    ...(timerSeconds > 0 ? { timerSeconds } : {}),
+  return updateMessages(contactId, (messages) => {
+    messages.push({
+      id: envelope.id,
+      direction: "sent",
+      text,
+      status: "sent",
+      createdAt: new Date().toISOString(),
+      ...(timerSeconds > 0 ? { timerSeconds } : {}),
+    });
   });
-  await saveMessages(contactId, messages);
-  return messages;
 }
 
 export type FileSendStage = "encrypting" | "sending" | "sent";
@@ -309,20 +419,20 @@ export async function sendFile(
   onStage("sending");
   await sendToContact(contactId, new TextEncoder().encode(JSON.stringify(envelope)), account, store);
 
-  const messages = await loadMessages(contactId);
-  messages.push({
-    id: envelope.id,
-    direction: "sent",
-    text: "",
-    status: "sent",
-    createdAt: new Date().toISOString(),
-    file: { filename: envelope.filename, mimeType: envelope.mimeType, size: envelope.size, bytes },
-    ...(destruct && "onOpen" in destruct ? { destructOnOpen: true } : {}),
-    // Pegged to send time, not read time: a timed file must vanish on schedule
-    // even if the recipient never opens it, unlike disappearing text messages.
-    ...(destruct && "afterSeconds" in destruct ? { expiresAt: new Date(Date.now() + destruct.afterSeconds * 1000).toISOString() } : {}),
+  const messages = await updateMessages(contactId, (history) => {
+    history.push({
+      id: envelope.id,
+      direction: "sent",
+      text: "",
+      status: "sent",
+      createdAt: new Date().toISOString(),
+      file: { filename: envelope.filename, mimeType: envelope.mimeType, size: envelope.size, bytes },
+      ...(destruct && "onOpen" in destruct ? { destructOnOpen: true } : {}),
+      // Pegged to send time, not read time: a timed file must vanish on schedule
+      // even if the recipient never opens it, unlike disappearing text messages.
+      ...(destruct && "afterSeconds" in destruct ? { expiresAt: new Date(Date.now() + destruct.afterSeconds * 1000).toISOString() } : {}),
+    });
   });
-  await saveMessages(contactId, messages);
   onStage("sent");
   return messages;
 }
@@ -336,13 +446,10 @@ export async function markFileOpened(contactId: string, messageId: string, accou
   const receipt: FileOpenedEnvelope = { type: "file-opened", refId: messageId };
   await sendToContact(contactId, new TextEncoder().encode(JSON.stringify(receipt)), account, store);
 
-  const messages = await loadMessages(contactId);
-  const target = messages.find((m) => m.id === messageId);
-  if (!target?.destructOnOpen) return messages;
-
-  const remaining = messages.filter((m) => m.id !== messageId);
-  await saveMessages(contactId, remaining);
-  return remaining;
+  return updateMessages(contactId, (messages) => {
+    if (!messages.find((m) => m.id === messageId)?.destructOnOpen) return false;
+    return messages.filter((m) => m.id !== messageId);
+  });
 }
 
 /**
@@ -360,17 +467,21 @@ export async function markFileOpened(contactId: string, messageId: string, accou
  * exposes - "read" now means a person actually opened the conversation.
  */
 export async function markConversationRead(contactId: string, account: LocalAccount, store: SignalStore): Promise<ChatMessage[]> {
-  const messages = await loadMessages(contactId);
-  let changed = false;
-  for (const m of messages) {
-    if (m.direction !== "received" || m.status !== "delivered") continue;
+  const unread = (await loadMessages(contactId)).filter((m) => m.direction === "received" && m.status === "delivered");
+  for (const m of unread) {
     const receipt: ReceiptEnvelope = { type: "read", refId: m.id };
     await sendToContact(contactId, new TextEncoder().encode(JSON.stringify(receipt)), account, store);
-    m.status = "read";
-    changed = true;
   }
-  if (changed) await saveMessages(contactId, messages);
-  return messages;
+  const sent = new Set(unread.map((m) => m.id));
+  return updateMessages(contactId, (messages) => {
+    let changed = false;
+    for (const m of messages) {
+      if (!sent.has(m.id) || m.status !== "delivered") continue;
+      m.status = "read";
+      changed = true;
+    }
+    return changed ? undefined : false;
+  });
 }
 
 function buildReceivedTextMessage(envelope: TextEnvelope, createdAt: string, timerSeconds: number): ChatMessage {
@@ -405,9 +516,10 @@ function buildReceivedFileMessage(envelope: FileEnvelope, createdAt: string): Ch
  * currently open contact - including a first-ever message from someone new -
  * is still saved into that sender's own local history and reported via
  * `onIncomingChat`, rather than dropped: `GET /v1/messages` is fetch-and-
- * delete server-side, so this is the only chance to keep it. Everything else
- * (call signals, timers, receipts) only makes sense inside an already-open
- * conversation with that sender and is dropped if it's not open.
+ * delete server-side, so this is the only chance to keep it. Call signals are
+ * forwarded to `onCallSignal` from any sender, open or not. Timers and
+ * receipts only make sense inside an already-open conversation with that
+ * sender and are dropped if it's not open.
  *
  * Receipts: for the currently open contact, delivered and read fire together
  * as soon as a text message is decrypted, since the user is actively looking
@@ -418,25 +530,69 @@ function buildReceivedFileMessage(envelope: FileEnvelope, createdAt: string): Ch
  * don't get delivered/read receipts at all yet - only text does; add them if
  * file status tracking turns out to matter.
  */
-export async function poll(
+// GET /v1/messages is fetch-and-delete and every poll reads, extends and rewrites the local
+// history of whoever wrote: two polls running at once (an interval firing while the previous
+// one is still busy, a forced poll on becoming visible) lose messages that way. They queue.
+let pollTail: Promise<unknown> = Promise.resolve();
+
+export function poll(...args: Parameters<typeof pollOnce>): ReturnType<typeof pollOnce> {
+  const run = pollTail.then(() => pollOnce(...args));
+  pollTail = run.catch(() => undefined);
+  return run;
+}
+
+/**
+ * Compares the device-list stamp an envelope carries with what the server shows us for its
+ * sender. Never throws: the message is already decrypted, and nothing here may make it look lost.
+ * A stamp newer than anything the server will give us, or a different head at the same version,
+ * is raised to the user.
+ */
+async function checkStamp(senderId: string, stamp: ChainStamp, account: LocalAccount): Promise<void> {
+  try {
+    let state = await pinnedChain(senderId);
+    if (!state || stamp.v > state.version) {
+      try {
+        state = await verifiedChain(senderId, account);
+      } catch (err) {
+        if (!(err instanceof ChainUnavailableError)) return raiseNotice("chain-forked", senderId);
+      }
+    }
+    if (!state || stamp.v > state.version) return raiseNotice("chain-withheld", senderId);
+    if (stamp.v === state.version && headHex(state.head) !== stamp.h) return raiseNotice("chain-forked", senderId);
+  } catch (err) {
+    console.warn("could not check a device-list stamp:", err);
+  }
+}
+
+async function pollOnce(
   contactId: string | undefined,
   account: LocalAccount,
   store: SignalStore,
-  onCallSignal?: (envelope: CallEnvelope) => Promise<void>,
+  onCallSignal?: (envelope: CallEnvelope, senderAccountId: string) => Promise<void>,
   onGroupSignal?: (envelope: GroupEnvelope, senderAccountId: string) => Promise<void>,
   onIncomingChat?: (senderAccountId: string) => void,
 ): Promise<ChatMessage[]> {
-  const received = await fetchMessages(account);
-  const messages = contactId ? await loadMessages(contactId) : [];
-  // Local history for senders other than the open contact, loaded lazily
-  // since a single poll can surface messages from several new senders at once.
-  const otherSenderMessages = new Map<string, ChatMessage[]>();
-  async function bucketFor(senderId: string): Promise<ChatMessage[]> {
-    if (!otherSenderMessages.has(senderId)) otherSenderMessages.set(senderId, await loadMessages(senderId));
-    return otherSenderMessages.get(senderId)!;
-  }
+  // Messages that could not be processed last time only because the server was unreachable go first.
+  const received = [...(await takeRetries()), ...(await fetchMessages(account))];
+  // Every history change goes through updateMessages, one envelope at a time, so a send
+  // running in parallel can never overwrite it (or be overwritten by it).
+  const append = (id: string, message: ChatMessage) => updateMessages(id, (history) => void history.push(message));
+  const markSent = (id: string, refId: string, change: (m: ChatMessage) => void) =>
+    updateMessages(id, (history) => {
+      const target = history.find((m) => m.id === refId && m.direction === "sent");
+      if (!target) return false;
+      change(target);
+    });
 
-  for (const message of received) {
+  // Messages whose ratchet step is done: one of these must never be retried (it would not decrypt twice).
+  const consumed = new WeakSet<ReceivedMessage>();
+
+  // Receipts are best effort. The message they answer is already stored, and a failure here
+  // (server unreachable) must not make the message look unprocessed.
+  const sendReceipt = (to: string, receipt: ReceiptEnvelope) =>
+    sendToContact(to, new TextEncoder().encode(JSON.stringify(receipt)), account, store).catch((err) => console.warn("receipt not sent:", err));
+
+  async function handle(message: ReceivedMessage): Promise<void> {
     // Every message is decrypted regardless of sender, *before* deciding
     // whether it's for the open 1:1 conversation - a group message can arrive
     // from any member, not just whichever contact happens to be open, so the
@@ -446,74 +602,112 @@ export async function poll(
     // that sender's local ratchet from the one they hold.
     const key = sessionKey(message.senderAccountId, message.senderDeviceId);
     await restoreSession(store, key);
+    // A first message carries the sender's identity key: it is admitted only if that device, with
+    // that key, is in the sender's signed device list. Our pin is asked first; the server only when
+    // the pin does not know the device yet (a device added since we last looked).
+    const firstMessageIdentity = prekey_message_identity(message.envelope);
+    if (firstMessageIdentity) {
+      let chain = await pinnedChain(message.senderAccountId);
+      if (!chain?.devices.some((d) => d.deviceId === message.senderDeviceId && sameBytes(d.identityKey, firstMessageIdentity))) {
+        try {
+          chain = await verifiedChain(message.senderAccountId, account);
+        } catch (err) {
+          if (err instanceof ChainUnavailableError) throw err;
+          await raiseNotice("chain-forked", message.senderAccountId);
+          return;
+        }
+      }
+      if (!(await admitPeer(store, message.senderAccountId, message.senderDeviceId, key, firstMessageIdentity, chain))) return;
+    }
     const plaintext = store.decrypt(key, message.envelope);
-    const envelope = JSON.parse(new TextDecoder().decode(plaintext)) as Envelope;
+    consumed.add(message);
+    const envelope: unknown = JSON.parse(new TextDecoder().decode(plaintext));
+    if (!isValidEnvelope(envelope)) {
+      console.warn(`dropped a malformed envelope from ${message.senderAccountId}`);
+      await persistSession(store, key);
+      return;
+    }
+    await checkStamp(message.senderAccountId, envelope.chain, account);
 
     if (isGroupEnvelope(envelope)) {
       await onGroupSignal?.(envelope, message.senderAccountId);
       await persistSession(store, key);
-      continue;
+      return;
+    }
+
+    if (isCallEnvelope(envelope)) {
+      await onCallSignal?.(envelope, message.senderAccountId);
+      await persistSession(store, key);
+      return;
     }
 
     if (!contactId || message.senderAccountId !== contactId) {
       if (envelope.type === "text") {
-        const bucket = await bucketFor(message.senderAccountId);
-        bucket.push(buildReceivedTextMessage(envelope, message.createdAt, getTimerSeconds(message.senderAccountId)));
+        await append(message.senderAccountId, buildReceivedTextMessage(envelope, message.createdAt, getTimerSeconds(message.senderAccountId)));
         // "delivered" only, not "read" - see markConversationRead's doc comment.
-        const receipt: ReceiptEnvelope = { type: "delivered", refId: envelope.id };
-        await sendToContact(message.senderAccountId, new TextEncoder().encode(JSON.stringify(receipt)), account, store);
+        await sendReceipt(message.senderAccountId, { type: "delivered", refId: envelope.id });
         onIncomingChat?.(message.senderAccountId);
       } else if (envelope.type === "file") {
-        const bucket = await bucketFor(message.senderAccountId);
-        bucket.push(buildReceivedFileMessage(envelope, message.createdAt));
+        await append(message.senderAccountId, buildReceivedFileMessage(envelope, message.createdAt));
         onIncomingChat?.(message.senderAccountId);
       } else {
-        // Calls/timer/file-opened/receipts only make sense inside an already-
+        // Timer/file-opened/receipts only make sense inside an already-
         // open conversation with that sender - nothing to update if it's not.
         console.warn(`dropped a ${envelope.type} envelope from ${message.senderAccountId}: no open conversation for that sender`);
       }
       await persistSession(store, key);
-      continue;
+      return;
     }
 
-    if (isCallEnvelope(envelope)) {
-      await onCallSignal?.(envelope);
-    } else if (envelope.type === "text") {
-      messages.push(buildReceivedTextMessage(envelope, message.createdAt, getTimerSeconds(contactId)));
+    if (envelope.type === "text") {
+      await append(contactId, buildReceivedTextMessage(envelope, message.createdAt, getTimerSeconds(contactId)));
 
       for (const type of ["delivered", "read"] as const) {
-        const receipt: ReceiptEnvelope = { type, refId: envelope.id };
-        await sendToContact(contactId, new TextEncoder().encode(JSON.stringify(receipt)), account, store);
+        await sendReceipt(contactId, { type, refId: envelope.id });
       }
     } else if (envelope.type === "file") {
-      messages.push(buildReceivedFileMessage(envelope, message.createdAt));
+      await append(contactId, buildReceivedFileMessage(envelope, message.createdAt));
     } else if (envelope.type === "timer") {
       setTimerSecondsLocal(contactId, envelope.seconds);
     } else if (envelope.type === "file-opened") {
-      const target = messages.find((m) => m.id === envelope.refId && m.direction === "sent");
-      if (target) target.status = "opened";
+      await markSent(contactId, envelope.refId, (m) => void (m.status = "opened"));
     } else if (envelope.type === "typing") {
       handleTypingSignal();
     } else {
-      const target = messages.find((m) => m.id === envelope.refId && m.direction === "sent");
-      if (target) {
-        target.status = envelope.type;
-        if (envelope.type === "read" && target.timerSeconds && !target.expiresAt) {
+      const status = envelope.type;
+      await markSent(contactId, envelope.refId, (target) => {
+        target.status = status;
+        if (status === "read" && target.timerSeconds && !target.expiresAt) {
           target.expiresAt = new Date(Date.now() + target.timerSeconds * 1000).toISOString();
         }
-      }
+      });
     }
 
     await persistSession(store, key);
   }
 
-  for (const [senderId, msgs] of otherSenderMessages) {
-    await saveMessages(senderId, msgs);
+  // One bad message (garbage ciphertext, replay, hostile fields) must not take the rest of the
+  // batch with it: the server already deleted them, so a throw here loses them for good.
+  for (const message of received) {
+    try {
+      await handle(message);
+    } catch (err) {
+      if (err instanceof ChainUnavailableError && !consumed.has(message)) {
+        console.warn(`could not check ${message.senderAccountId}'s device list, will retry:`, err.message);
+        await holdForRetry(message);
+        continue;
+      }
+      console.warn(`dropped a message from ${message.senderAccountId}:`, err);
+      // Decrypt may have advanced the ratchet before the failure: keep disk and memory in step.
+      await persistSession(store, sessionKey(message.senderAccountId, message.senderDeviceId)).catch(() => {});
+    }
   }
 
-  const now = Date.now();
-  const alive = messages.filter((m) => !m.expiresAt || new Date(m.expiresAt).getTime() > now);
-
-  if (contactId && (received.length > 0 || alive.length !== messages.length)) await saveMessages(contactId, alive);
-  return alive;
+  if (!contactId) return [];
+  // Sweeps expired messages, and returns the open history for the screen.
+  return updateMessages(contactId, (history) => {
+    const now = Date.now();
+    const alive = history.filter((m) => !m.expiresAt || new Date(m.expiresAt).getTime() > now);
+    return alive.length === history.length ? false : alive;
+  });
 }

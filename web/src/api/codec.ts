@@ -6,6 +6,13 @@ export function toBase64(bytes: Uint8Array | number[]): string {
   return btoa(binary);
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Ids from the server become storage keys, session addresses (`account:device`) and URL paths: only real UUIDs pass. */
+export function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID.test(value);
+}
+
 export function fromBase64(value: string): Uint8Array {
   return Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
 }

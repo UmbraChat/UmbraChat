@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ChatMessage } from "../storage/messageStore";
 import { isFileTooLarge, subscribeToTypingState, resetTypingState, type FileDestruct, type FileSendStage } from "../chat/conversation";
+import type { DeviceFingerprint } from "../crypto/trust";
 import { loadNickname, saveNickname } from "../storage/nicknameStore";
 
 interface ConversationProps {
@@ -13,6 +14,7 @@ interface ConversationProps {
   onSetTimer: (seconds: number) => void;
   onTyping: () => void;
   onBack: () => void;
+  onLoadFingerprints: () => Promise<DeviceFingerprint[]>;
   sending: boolean;
   fileStage?: FileSendStage;
   callActive: boolean;
@@ -49,6 +51,8 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+const SAFE_IMAGE_TYPE = /^image\/(png|jpeg|gif|webp|avif)$/;
+
 function FileMessage({ message, onOpenFile }: { message: ChatMessage; onOpenFile: (messageId: string) => void }) {
   const file = message.file!;
   // Keyed on message.id, not file.bytes: messages reload fresh from storage on
@@ -61,9 +65,11 @@ function FileMessage({ message, onOpenFile }: { message: ChatMessage; onOpenFile
   // breaking the download - a revoke-on-cleanup + useMemo combination isn't
   // StrictMode-safe. The URL's lifetime is already bounded to the page
   // session (freed on reload/close); fine at this scale.
-  const url = useMemo(() => URL.createObjectURL(new Blob([Uint8Array.from(file.bytes)], { type: file.mimeType })), [message.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The sender picks mimeType: text/html or image/svg+xml in a blob: URL opened in a tab would run
+  // as a page of this app's origin, where the keys are. Only raster images keep their type.
+  const isImage = SAFE_IMAGE_TYPE.test(file.mimeType);
+  const url = useMemo(() => URL.createObjectURL(new Blob([Uint8Array.from(file.bytes)], { type: isImage ? file.mimeType : "application/octet-stream" })), [message.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const selfDestructs = message.destructOnOpen || message.timerSeconds || message.expiresAt;
-  const isImage = file.mimeType.startsWith("image/");
 
   return (
     <span data-testid="file-message">
@@ -91,6 +97,7 @@ export function Conversation({
   onSetTimer,
   onTyping,
   onBack,
+  onLoadFingerprints,
   sending,
   fileStage,
   callActive,
@@ -98,6 +105,7 @@ export function Conversation({
   error,
 }: ConversationProps) {
   const [text, setText] = useState("");
+  const [fingerprints, setFingerprints] = useState<DeviceFingerprint[]>();
   const [fileError, setFileError] = useState<string>();
   const [destructMode, setDestructMode] = useState("none");
   const [nickname, setNickname] = useState<string>();
@@ -182,6 +190,25 @@ export function Conversation({
           </select>
         </label>
       </div>
+
+      <details
+        className="hint"
+        onToggle={(e) => {
+          if (e.currentTarget.open) onLoadFingerprints().then(setFingerprints).catch(() => setFingerprints([]));
+        }}
+      >
+        <summary>Verify this contact</summary>
+        <p>Safety number of this conversation: you and your contact must see exactly the same number. Compare in person or on a call, not in this chat.</p>
+        {fingerprints?.length === 0 && <p>No secure session with this contact yet: send a message first.</p>}
+        {fingerprints?.map((f) => (
+          <p key={f.deviceId}>
+            {f.label}
+            <span className="chip chip--block" data-testid="contact-fingerprint">
+              {f.safetyNumber}
+            </span>
+          </p>
+        ))}
+      </details>
 
       {contactTyping && (
         <p className="hint" data-testid="typing-indicator">

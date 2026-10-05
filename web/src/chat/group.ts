@@ -2,7 +2,7 @@ import type { SignalStore } from "wasm-crypto";
 import type { LocalAccount } from "../storage/keyStore";
 import { sendToContact, type GroupEnvelope } from "./conversation";
 import { loadGroup, saveGroup, type Group } from "../storage/groupStore";
-import { loadMessages, saveMessages, type ChatMessage } from "../storage/messageStore";
+import { updateMessages, type ChatMessage } from "../storage/messageStore";
 
 export { loadAllGroups, type Group } from "../storage/groupStore";
 
@@ -36,10 +36,9 @@ export async function sendGroupText(groupId: string, text: string, account: Loca
     await sendToContact(memberAccountId, plaintext, account, store);
   }
 
-  const messages = await loadMessages(groupId);
-  messages.push({ id, direction: "sent", text, status: "sent", createdAt: new Date().toISOString() });
-  await saveMessages(groupId, messages);
-  return messages;
+  return updateMessages(groupId, (messages) => {
+    messages.push({ id, direction: "sent", text, status: "sent", createdAt: new Date().toISOString() });
+  });
 }
 
 export async function removeMember(groupId: string, memberAccountId: string, account: LocalAccount, store: SignalStore): Promise<Group> {
@@ -90,14 +89,14 @@ export async function handleGroupSignal(envelope: GroupEnvelope, senderAccountId
   // not a shared group key, is what "removal" actually guarantees here.
   if (!group || !group.memberAccountIds.includes(senderAccountId)) return;
 
-  const messages = await loadMessages(envelope.groupId);
-  messages.push({
-    id: envelope.id,
-    direction: "received",
-    text: envelope.body,
-    status: "delivered",
-    createdAt: new Date().toISOString(),
-    senderAccountId,
+  await updateMessages(envelope.groupId, (messages) => {
+    messages.push({
+      id: envelope.id,
+      direction: "received",
+      text: envelope.body,
+      status: "delivered",
+      createdAt: new Date().toISOString(),
+      senderAccountId,
+    });
   });
-  await saveMessages(envelope.groupId, messages);
 }

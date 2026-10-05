@@ -2,11 +2,7 @@ import type { LocalAccount } from "../storage/keyStore";
 import { signWithIdentity } from "../crypto/identity";
 import { toBase64 } from "./codec";
 
-// Same-origin by default - Vite's dev proxy (see vite.config.ts) forwards
-// /v1 to the Rust server, which keeps this working over HTTPS without
-// mixed-content blocking (matches api/register.ts). VITE_API_BASE overrides
-// it for a real deploy where the API isn't co-located.
-const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+import { apiFetch } from "./server";
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes));
@@ -23,10 +19,11 @@ export async function signedFetch(path: string, method: "GET" | "POST" | "DELETE
   const bodyText = body ? JSON.stringify(body) : "";
   const bodyHash = await sha256Hex(new TextEncoder().encode(bodyText));
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  const message = new TextEncoder().encode(`${method}\n${path}\n${timestamp}\n${bodyHash}`);
+  // The server verifies the path without its query string.
+  const message = new TextEncoder().encode(`${method}\n${path.split("?")[0]}\n${timestamp}\n${bodyHash}`);
   const signature = await signWithIdentity(account.identity.identity_private_key, message);
 
-  return fetch(`${API_BASE}${path}`, {
+  return apiFetch(path, {
     method,
     headers: {
       "content-type": "application/json",

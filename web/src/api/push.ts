@@ -1,7 +1,8 @@
 import type { LocalAccount } from "../storage/keyStore";
 import { signedFetch } from "./signedRequest";
+import { apiFetch } from "./server";
 
-/** VITE_VAPID_PUBLIC_KEY is base64url (the format the web-push ecosystem
+/** The VAPID public key is base64url (the format the web-push ecosystem
  * uses everywhere, including the server's own key generation) - api/codec.ts's
  * fromBase64 uses atob() directly, which only understands standard base64
  * (+/ instead of -_), so it can't be reused here without first converting. */
@@ -10,6 +11,13 @@ export function vapidPublicKeyToUint8Array(base64url: string): Uint8Array {
   const base64 = (base64url + padding).replace(/-/g, "+").replace(/_/g, "/");
   const binary = atob(base64);
   return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
+/** The server's own VAPID public key, so a client not built for one server can still subscribe to push. */
+export async function fetchPushPublicKey(): Promise<string> {
+  const response = await apiFetch("/v1/push-key");
+  if (!response.ok) throw new Error("push notifications aren't configured on this server");
+  return ((await response.json()) as { public_key: string }).public_key;
 }
 
 export async function registerPushSubscription(subscription: PushSubscriptionJSON, account: LocalAccount): Promise<void> {

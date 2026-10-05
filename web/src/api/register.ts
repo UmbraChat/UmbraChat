@@ -1,22 +1,32 @@
 import type { IdentityBundle } from "../crypto/identity";
-import { identityBundleToJson } from "./codec";
+import { identityBundleToJson, toBase64 } from "./codec";
+import { genesisStatement, signStatement } from "../crypto/deviceList";
 
-// Same-origin by default - Vite's dev proxy (see vite.config.ts) forwards
-// /v1 to the Rust server, which keeps this working over HTTPS without
-// mixed-content blocking (matches api/signedRequest.ts). VITE_API_BASE
-// overrides it for a real deploy where the API isn't co-located.
-export const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+import { apiFetch } from "./server";
 
 export interface RegisteredAccount {
   accountId: string;
   deviceId: string;
 }
 
+/**
+ * Registers a new account. The ids are chosen here, not by the server: they are inside the
+ * first statement of the account's signed device list, which has to be signed before it is sent.
+ */
 export async function registerAccount(identity: IdentityBundle): Promise<RegisteredAccount> {
-  const response = await fetch(`${API_BASE}/v1/register`, {
+  const accountId = crypto.randomUUID();
+  const deviceId = crypto.randomUUID();
+  const genesis = await signStatement(genesisStatement(accountId, { deviceId, identityKey: Uint8Array.from(identity.identity_public_key) }), identity.identity_private_key);
+
+  const response = await apiFetch("/v1/register", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(identityBundleToJson(identity)),
+    body: JSON.stringify({
+      account_id: accountId,
+      device_id: deviceId,
+      device_list: { statement: toBase64(genesis.bytes), signature: toBase64(genesis.signature) },
+      ...identityBundleToJson(identity),
+    }),
   });
 
   if (!response.ok) {
@@ -24,6 +34,7 @@ export async function registerAccount(identity: IdentityBundle): Promise<Registe
     throw new Error(error.error ?? "registration failed");
   }
 
-  const { account_id, device_id } = (await response.json()) as { account_id: string; device_id: string };
-  return { accountId: account_id, deviceId: device_id };
+  const body = (await response.json()) as { account_id: string; device_id: string };
+  if (body.account_id !== accountId || body.device_id !== deviceId) throw new Error("the server answered with other ids than the ones registered");
+  return { accountId, deviceId };
 }

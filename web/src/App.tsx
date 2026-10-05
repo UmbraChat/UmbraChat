@@ -7,6 +7,9 @@ import { isEncryptionEnabled, isVaultActive, unlock } from "./crypto/vault";
 import { loadMessages, type ChatMessage } from "./storage/messageStore";
 import { registerAccount } from "./api/register";
 import { completeLink } from "./api/devices";
+import { fetchDeviceActive } from "./api/chain";
+import { acceptInvite, inviteFor, verifiedChain } from "./crypto/chains";
+import { parseInvite } from "./crypto/invite";
 import {
   startConversation,
   sendText,
@@ -27,6 +30,10 @@ import { openStore } from "./crypto/session";
 import { loadGroup } from "./storage/groupStore";
 import { CreateAccount } from "./screens/CreateAccount";
 import { SafetyNumber } from "./screens/SafetyNumber";
+import { TrustAlerts } from "./screens/TrustAlerts";
+import { VersionMismatch } from "./screens/VersionMismatch";
+import { subscribeToProtocolMismatch, type ProtocolMismatch } from "./api/protocol";
+import { subscribeToTrustAlerts, dismissTrustAlert, contactSafetyNumbers, loadTrustState, type TrustAlert } from "./crypto/trust";
 import { LinkedDevices } from "./screens/LinkedDevices";
 import { NewConversation } from "./screens/NewConversation";
 import { Conversation } from "./screens/Conversation";
@@ -54,9 +61,19 @@ type Status =
   | { status: "group"; account: LocalAccount; group: Group; store: SignalStore; messages: ChatMessage[] }
   | { status: "settings"; account: LocalAccount };
 
+// A background poll that fails (server unreachable, this device removed from its account) is retried at
+// the next tick; it must not surface as an uncaught error.
+const onPollError = (err: unknown) => console.warn("poll failed:", err);
+
+const LINK_POLL_MS = 2000;
+const LINK_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
+
 function App() {
   const [state, setState] = useState<Status>({ status: "loading" });
   const [creating, setCreating] = useState(false);
+  // While this device waits for another one to accept it: the key fingerprint to compare there.
+  const [linkFingerprint, setLinkFingerprint] = useState<string>();
+  const linkCancelled = useRef(false);
   const [starting, setStarting] = useState(false);
   const [sending, setSending] = useState(false);
   const [fileStage, setFileStage] = useState<FileSendStage>();
@@ -76,9 +93,17 @@ function App() {
   // un-polled long after it arrives server-side. Firing one poll the moment
   // the tab becomes visible again catches up immediately instead of waiting
   // for the next interval tick, which may not come for a while.
+  const [trustAlerts, setTrustAlerts] = useState<TrustAlert[]>([]);
+  const [protocolMismatch, setProtocolMismatch] = useState<ProtocolMismatch>();
   const activePollRef = useRef<() => Promise<void>>(undefined);
 
   useEffect(() => subscribeToCallState(setCallState), []);
+  useEffect(() => subscribeToTrustAlerts(setTrustAlerts), []);
+  useEffect(() => subscribeToProtocolMismatch(setProtocolMismatch), []);
+  const signedIn = "account" in state;
+  useEffect(() => {
+    if (signedIn) loadTrustState().catch((err) => console.error("loadTrustState failed:", err));
+  }, [signedIn]);
 
   useEffect(() => {
     function onVisible() {
@@ -146,7 +171,7 @@ function App() {
 
     const store = await openStore(account.identity);
     const runPoll = async () => {
-      await poll(undefined, account, store, undefined, handleGroupSignal, addPendingChat);
+      await poll(undefined, account, store, handleCallSignal, handleGroupSignal, addPendingChat);
       const updatedGroups = await loadAllGroups();
       setState((s) => (s.status === "identity-ready" ? { ...s, groups: updatedGroups } : s));
     };
@@ -156,10 +181,10 @@ function App() {
     pollTimer.current = undefined;
     pollIntervalRef.current = POLL_INTERVAL_MS;
     await runPoll();
-    pollTimer.current = window.setInterval(runPoll, POLL_INTERVAL_MS);
+    pollTimer.current = window.setInterval(() => void runPoll().catch(onPollError), POLL_INTERVAL_MS);
   }
 
-  async function enterConversation(account: LocalAccount, contactId: string) {
+  async function enterConversation(account: LocalAccount, contactId: string): Promise<SignalStore> {
     const store = await startConversation(contactId, account);
     const messages = await loadMessages(contactId);
     setState({ status: "conversation", account, contactId, store, messages });
@@ -185,7 +210,7 @@ function App() {
       if (desiredInterval !== pollIntervalRef.current || pollTimer.current === undefined) {
         pollIntervalRef.current = desiredInterval;
         window.clearInterval(pollTimer.current);
-        pollTimer.current = window.setInterval(runPoll, desiredInterval);
+        pollTimer.current = window.setInterval(() => void runPoll().catch(onPollError), desiredInterval);
       }
     };
     activePollRef.current = runPoll;
@@ -195,6 +220,7 @@ function App() {
     // setInterval only fires after a full interval elapses - poll once immediately
     // too, so messages queued while offline show up on reconnect without delay.
     await runPoll();
+    return store;
   }
 
   // Shares the exact same pollTimer/pollIntervalRef as enterConversation -
@@ -211,7 +237,7 @@ function App() {
       // poll()'s own return value is always [] with no contactId - a group's
       // messages are written straight to storage by handleGroupSignal instead,
       // so they're reloaded from there, not taken from poll()'s result.
-      await poll(undefined, account, store, undefined, handleGroupSignal, addPendingChat);
+      await poll(undefined, account, store, handleCallSignal, handleGroupSignal, addPendingChat);
       const [refreshedGroup, updatedMessages] = await Promise.all([loadGroup(groupId), loadMessages(groupId)]);
       setState((s) => (s.status === "group" && refreshedGroup ? { ...s, group: refreshedGroup, messages: updatedMessages } : s));
     };
@@ -221,7 +247,7 @@ function App() {
     pollTimer.current = undefined;
     pollIntervalRef.current = POLL_INTERVAL_MS;
     await runPoll();
-    pollTimer.current = window.setInterval(runPoll, POLL_INTERVAL_MS);
+    pollTimer.current = window.setInterval(() => void runPoll().catch(onPollError), POLL_INTERVAL_MS);
   }
 
   async function handleCreate() {
@@ -247,11 +273,23 @@ function App() {
       const identity = await generateIdentity();
       const deviceId = await completeLink(accountId, code, "Linked Device", identity);
       const account: LocalAccount = { accountId, deviceId, identity };
+      // The key went through the server, so it is accepted only once a device already in the account
+      // has shown the user this same fingerprint and signed a statement that includes it.
+      linkCancelled.current = false;
+      setLinkFingerprint(await computeSafetyNumber(identity.identity_public_key));
+      const deadline = Date.now() + LINK_APPROVAL_TIMEOUT_MS;
+      while (!(await fetchDeviceActive(deviceId))) {
+        if (linkCancelled.current) throw new Error("linking cancelled");
+        if (Date.now() > deadline) throw new Error("no device accepted this one in time, start again");
+        await new Promise((resolve) => window.setTimeout(resolve, LINK_POLL_MS));
+      }
+      await verifiedChain(accountId, account); // throws unless the signed list really holds this device's key
       await saveAccount(account);
       await enterIdentityReady(account);
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to link device");
     } finally {
+      setLinkFingerprint(undefined);
       setCreating(false);
     }
   }
@@ -269,8 +307,10 @@ function App() {
     }
   }
 
-  async function handleStartConversation(contactId: string) {
+  async function handleStartConversation(entered: string) {
     if (state.status !== "identity-ready") return;
+    const invite = parseInvite(entered);
+    const contactId = invite ? invite.accountId : entered;
     if (contactId === state.account.accountId) {
       setError("that's your own account id - enter a contact's id instead");
       return;
@@ -278,6 +318,7 @@ function App() {
     setStarting(true);
     setError(undefined);
     try {
+      if (invite) await acceptInvite(invite, state.account);
       await enterConversation(state.account, contactId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed to start conversation");
@@ -402,6 +443,57 @@ function App() {
     }
   }
 
+  async function callContext() {
+    if (!("account" in state)) return undefined;
+    const store = state.status === "conversation" || state.status === "group" ? state.store : await openStore(state.account.identity);
+    return { account: state.account, store };
+  }
+
+  async function handleAcceptCall() {
+    if (!("account" in state) || callState.status !== "incoming-ringing") return;
+    const peer = callState.callerAccountId;
+    const store = state.status === "conversation" && state.contactId === peer ? state.store : await enterConversation(state.account, peer);
+    await acceptCall(peer, state.account, store);
+  }
+
+  async function handleDeclineCall() {
+    const ctx = await callContext();
+    if (ctx && callState.status === "incoming-ringing") await declineCall(callState.callerAccountId, ctx.account, ctx.store);
+  }
+
+  async function handleHangUpCall() {
+    const ctx = await callContext();
+    if (ctx && (callState.status === "outgoing-ringing" || callState.status === "connecting" || callState.status === "connected")) {
+      await hangUp(callState.contactId, ctx.account, ctx.store);
+    }
+  }
+
+  const callScreen =
+    callState.status !== "idle" && "account" in state ? (
+      <CallScreen
+        callState={callState}
+        onAccept={() => handleAcceptCall().catch((err) => console.error("acceptCall failed:", err))}
+        onDecline={() => handleDeclineCall().catch((err) => console.error("declineCall failed:", err))}
+        onHangUp={() => handleHangUpCall().catch((err) => console.error("hangUp failed:", err))}
+      />
+    ) : null;
+
+  const callOverlay = (
+    <>
+      <TrustAlerts alerts={trustAlerts} onDismiss={dismissTrustAlert} />
+      {callScreen}
+    </>
+  );
+
+  // A server on another version: nothing may be sent or shown as working until both match.
+  if (protocolMismatch) {
+    return (
+      <div className="app-shell">
+        <VersionMismatch mismatch={protocolMismatch} />
+      </div>
+    );
+  }
+
   if (state.status === "loading") return null;
 
   if (state.status === "locked") {
@@ -415,7 +507,7 @@ function App() {
   if (state.status === "anonymous") {
     return (
       <div className="app-shell">
-        <CreateAccount onCreate={handleCreate} onLink={handleLinkDevice} onRestore={handleRestore} creating={creating} error={error} />
+        <CreateAccount onCreate={handleCreate} onLink={handleLinkDevice} onRestore={handleRestore} creating={creating} error={error} linkFingerprint={linkFingerprint} onCancelLink={() => (linkCancelled.current = true)} />
       </div>
     );
   }
@@ -423,10 +515,11 @@ function App() {
   if (state.status === "identity-ready") {
     return (
       <div className="app-shell">
+        {callOverlay}
         <div className="screen">
           <h1>UmbraChat</h1>
           <IncomingChats pendingChats={pendingChats} onOpen={handleOpenPendingChat} />
-          <SafetyNumber accountId={state.account.accountId} safetyNumber={state.safetyNumber} />
+          <SafetyNumber accountId={state.account.accountId} safetyNumber={state.safetyNumber} onGetInvite={() => inviteFor(state.account)} />
           <LinkedDevices account={state.account} />
           <Groups groups={state.groups} ownAccountId={state.account.accountId} onCreateGroup={handleCreateGroup} onOpenGroup={handleOpenGroup} creating={creating} error={error} />
           <NewConversation onStart={handleStartConversation} starting={starting} error={error} />
@@ -441,6 +534,7 @@ function App() {
   if (state.status === "settings") {
     return (
       <div className="app-shell">
+        {callOverlay}
         <Settings account={state.account} onBack={handleBackToMenu} />
       </div>
     );
@@ -449,6 +543,7 @@ function App() {
   if (state.status === "group") {
     return (
       <div className="app-shell">
+        {callOverlay}
         <GroupConversation
           group={state.group}
           account={state.account}
@@ -467,14 +562,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      {callState.status !== "idle" && (
-        <CallScreen
-          callState={callState}
-          onAccept={() => acceptCall(contactId, account, store).catch((err) => console.error("acceptCall failed:", err))}
-          onDecline={() => declineCall(contactId, account, store).catch((err) => console.error("declineCall failed:", err))}
-          onHangUp={() => hangUp(contactId, account, store).catch((err) => console.error("hangUp failed:", err))}
-        />
-      )}
+      {callOverlay}
       <Conversation
         contactId={contactId}
         messages={state.messages}
@@ -485,6 +573,7 @@ function App() {
         onSetTimer={handleSetTimer}
         onTyping={handleTyping}
         onBack={handleBackToMenu}
+        onLoadFingerprints={() => contactSafetyNumbers(contactId, account, store)}
         sending={sending}
         fileStage={fileStage}
         callActive={callState.status !== "idle" && callState.status !== "ended"}

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { isEncryptionEnabled, enableEncryption, disableEncryption } from "../crypto/vault";
 import { exportBackup } from "../crypto/backup";
-import { registerPushSubscription, unregisterPushSubscription, vapidPublicKeyToUint8Array } from "../api/push";
+import { registerPushSubscription, unregisterPushSubscription, fetchPushPublicKey, vapidPublicKeyToUint8Array } from "../api/push";
+import { getServerUrl, isSameHostAsServer } from "../api/server";
 import {
   loadPushDisplayLevel,
   savePushDisplayLevel,
@@ -118,8 +119,7 @@ export function Settings({ account, onBack }: SettingsProps) {
         setNotifError("permission denied - allow notifications for this site in your browser settings to use this");
         return;
       }
-      const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY;
-      if (!vapidKey) throw new Error("push notifications aren't configured on this deployment");
+      const vapidKey = await fetchPushPublicKey();
 
       const registration = await navigator.serviceWorker.ready;
       const subscription = await registration.pushManager.subscribe({
@@ -166,6 +166,18 @@ export function Settings({ account, onBack }: SettingsProps) {
         </button>
         <h1>Settings</h1>
       </div>
+
+      <section className="panel stack" data-testid="server-info">
+        <h2>Server</h2>
+        <p className="chip chip--block" data-testid="server-url">
+          {getServerUrl() || window.location.origin}
+        </p>
+        {isSameHostAsServer() && (
+          <p className="hint" data-testid="same-host-warning">
+            This app and your server come from the same host, so that host could change the app's code. For the strongest protection, use a copy of the app that you installed yourself and that asks you for the server.
+          </p>
+        )}
+      </section>
 
       <section className="panel stack">
         <h2>Local Encryption</h2>

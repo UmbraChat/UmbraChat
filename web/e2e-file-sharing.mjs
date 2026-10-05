@@ -17,8 +17,9 @@ async function createAccount(context) {
   return { page, accountId };
 }
 
-const aliceContext = await browser.newContext();
-const bobContext = await browser.newContext();
+// bypassCSP: this test reads the download back with an in-page fetch(blob:), which the production CSP (connect-src 'self') blocks; the app itself never does that.
+const aliceContext = await browser.newContext({ bypassCSP: true });
+const bobContext = await browser.newContext({ bypassCSP: true });
 
 const alice = await createAccount(aliceContext);
 const bob = await createAccount(bobContext);

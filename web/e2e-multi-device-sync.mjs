@@ -33,7 +33,17 @@ check("a pairing code is issued", code.length > 0, code);
 await deviceB.fill('input[placeholder="Account ID"]', accountId);
 await deviceB.fill('input[placeholder="Pairing code"]', code);
 await deviceB.click("text=Link This Device");
-await deviceB.waitForSelector('[data-testid="account-id"]', { timeout: 15000 });
+
+// Device B waits to be accepted and shows its key fingerprint; device A shows the one it received.
+await deviceB.waitForSelector('[data-testid="link-fingerprint"]', { timeout: 15000 });
+const fingerprintOnB = (await deviceB.textContent('[data-testid="link-fingerprint"]')).trim();
+await deviceA.waitForSelector('[data-testid="pending-device"]', { timeout: 15000 });
+const fingerprintOnA = (await deviceA.textContent('[data-testid="pending-fingerprint"]')).trim();
+check("the fingerprint device A is asked to confirm is the one device B shows", fingerprintOnA === fingerprintOnB && fingerprintOnA.length > 0, `A=${fingerprintOnA} B=${fingerprintOnB}`);
+check("device A's list does not show device B before it is accepted", (await deviceA.locator('[data-testid="device-row"]').count()) === 1);
+await deviceA.click('[data-testid="accept-device"]');
+
+await deviceB.waitForSelector('[data-testid="account-id"]', { timeout: 30000 });
 const deviceBAccountId = (await deviceB.textContent('[data-testid="account-id"]')).trim();
 check("device B ends up on the identity-ready screen under the same account", deviceBAccountId === accountId, `A=${accountId} B=${deviceBAccountId}`);
 
@@ -59,8 +69,8 @@ await deviceA.waitForFunction(() => document.querySelectorAll('[data-testid="dev
 check("device A's list shows only one device after unlinking", true);
 
 // Sending to a nonexistent account must fail loudly, not silently vanish -
-// list_devices returns an empty array rather than 404ing for an unknown
-// account, so sendToContact has to reject a zero-device fan-out itself.
+// the server returns an empty device list for an unknown account, so there is nothing
+// to verify and sendToContact has to refuse.
 const ghostAccountId = "00000000-0000-0000-0000-000000000000";
 await deviceA.fill('input[placeholder="Recipient account id"]', ghostAccountId);
 await deviceA.click("text=Start Conversation");
@@ -69,7 +79,7 @@ await deviceA.fill('input[placeholder="Type a message..."]', "into the void");
 await deviceA.click("text=Send");
 await deviceA.waitForSelector('[role="alert"]', { timeout: 15000 });
 const ghostError = await deviceA.textContent('[role="alert"]');
-check("sending to a nonexistent account shows a visible error instead of silently vanishing", ghostError.toLowerCase().includes("no reachable devices"), ghostError);
+check("sending to a nonexistent account shows a visible error instead of silently vanishing", ghostError.toLowerCase().includes("signed device list"), ghostError);
 
 await browser.close();
 

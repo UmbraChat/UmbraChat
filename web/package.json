@@ -1,6 +1,7 @@
 {
   "name": "web",
   "private": true,
+  "license": "AGPL-3.0-only",
   "version": "0.0.0",
   "type": "module",
   "scripts": {
@@ -14,6 +15,7 @@
     "e2e:file-sharing": "node e2e-file-sharing.mjs",
     "e2e:disappearing-messages": "node e2e-disappearing-messages.mjs",
     "e2e:voice-video-calls": "node e2e-voice-video-calls.mjs",
+    "e2e:incoming-call-from-home": "node e2e-incoming-call-from-home.mjs",
     "e2e:screenshot-detection": "node e2e-screenshot-detection.mjs",
     "e2e:self-destructing-files": "node e2e-self-destructing-files.mjs",
     "e2e:multi-device-sync": "node e2e-multi-device-sync.mjs",
@@ -27,7 +29,15 @@
     "e2e:push-notifications": "node e2e-push-notifications.mjs",
     "e2e:nicknames": "node e2e-nicknames.mjs",
     "e2e:typing-signal": "node e2e-typing-signal.mjs",
-    "e2e:typing-indicator": "node e2e-typing-indicator.mjs"
+    "e2e:typing-indicator": "node e2e-typing-indicator.mjs",
+    "e2e:key-change-alert": "node e2e-key-change-alert.mjs",
+    "e2e:server-choice": "node e2e-server-choice.mjs",
+    "e2e:version-lock": "node e2e-version-lock.mjs",
+    "e2e:history-race": "node e2e-history-race.mjs",
+    "e2e:hostile-input": "node e2e-hostile-input.mjs",
+    "e2e:device-list": "node e2e-device-list.mjs",
+    "e2e:device-chain": "node e2e-device-chain.mjs",
+    "e2e:invite": "node e2e-invite.mjs"
   },
   "dependencies": {
     "react": "^19.2.7",

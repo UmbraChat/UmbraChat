@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import type { CallEndReason, CallState } from "../chat/call";
+import { switchCamera, type CallEndReason, type CallState } from "../chat/call";
+import { listDevices } from "../chat/mediaDevices";
 
 interface CallScreenProps {
   callState: Exclude<CallState, { status: "idle" }>;
@@ -34,6 +35,20 @@ function AudioPane({ stream }: { stream: MediaStream | null }) {
 
 export function CallScreen({ callState, onAccept, onDecline, onHangUp }: CallScreenProps) {
   const [muted, setMuted] = useState(false);
+  const [cameraCount, setCameraCount] = useState(0);
+  const [switching, setSwitching] = useState(false);
+
+  // Counted again as the call moves on: a browser may only list every camera once one is in use.
+  useEffect(() => {
+    listDevices("videoinput").then((cameras) => setCameraCount(cameras.length), () => setCameraCount(0));
+  }, [callState.status]);
+
+  function handleSwitchCamera() {
+    setSwitching(true);
+    switchCamera()
+      .catch((err) => console.warn("could not switch camera:", err))
+      .finally(() => setSwitching(false));
+  }
 
   function toggleMute() {
     if (!("localStream" in callState)) return;
@@ -88,6 +103,11 @@ export function CallScreen({ callState, onAccept, onDecline, onHangUp }: CallScr
           <button className="secondary" onClick={toggleMute}>
             {muted ? "Unmute" : "Mute"}
           </button>
+          {isVideo && cameraCount > 1 && (
+            <button className="secondary" onClick={handleSwitchCamera} disabled={switching}>
+              Switch camera
+            </button>
+          )}
           <button className="danger" onClick={onHangUp}>
             Hang Up
           </button>

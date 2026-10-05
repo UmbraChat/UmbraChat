@@ -3,6 +3,7 @@ import { isEncryptionEnabled, enableEncryption, disableEncryption, isKeyUnlockSu
 import { exportBackup } from "../crypto/backup";
 import { registerPushSubscription, unregisterPushSubscription, fetchPushPublicKey, vapidPublicKeyToUint8Array } from "../api/push";
 import { getServerUrl, isSameHostAsServer } from "../api/server";
+import { listDevices, loadMediaChoice, saveMediaChoice, type MediaChoice } from "../chat/mediaDevices";
 import {
   loadPushDisplayLevel,
   savePushDisplayLevel,
@@ -357,6 +358,8 @@ export function Settings({ account }: SettingsProps) {
         {notifError && <p role="alert">{notifError}</p>}
       </section>
 
+      <MediaDevices />
+
       <section className="panel stack">
         <h2>Typing indicator</h2>
         <div className="row">
@@ -394,5 +397,77 @@ function UnlockKeyRow({ unlockKey, onRename, onRemove }: { unlockKey: KeyUnlock;
         Remove
       </button>
     </div>
+  );
+}
+
+/** The microphone and camera calls use. Browsers name devices only once the site may use them. */
+function MediaDevices() {
+  const [choice, setChoice] = useState<MediaChoice>(loadMediaChoice());
+  const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
+  const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
+  const [error, setError] = useState<string>();
+
+  async function refresh() {
+    const [audio, video] = await Promise.all([listDevices("audioinput"), listDevices("videoinput")]);
+    setMics(audio);
+    setCameras(video);
+  }
+  useEffect(() => {
+    refresh().catch(() => {});
+  }, []);
+  const named = [...mics, ...cameras].some((d) => d.label);
+
+  async function askAccess() {
+    setError(undefined);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true }).catch(() => navigator.mediaDevices.getUserMedia({ audio: true }));
+      for (const track of stream.getTracks()) track.stop();
+      await refresh();
+    } catch {
+      setError("Allow this site to use the microphone and camera in your browser's settings, then try again.");
+    }
+  }
+
+  function choose(next: MediaChoice) {
+    setChoice(next);
+    saveMediaChoice(next);
+  }
+
+  return (
+    <section className="panel stack">
+      <h2>Camera and microphone</h2>
+      {named ? (
+        <>
+          <label className="field">
+            <span className="label">Microphone</span>
+            <select value={choice.audioId ?? ""} onChange={(e) => choose({ ...choice, audioId: e.target.value || undefined })}>
+              <option value="">Default</option>
+              {mics.map((d, i) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label || `Microphone ${i + 1}`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span className="label">Camera</span>
+            <select value={choice.videoId ?? ""} onChange={(e) => choose({ ...choice, videoId: e.target.value || undefined })}>
+              <option value="">Default</option>
+              {cameras.map((d, i) => (
+                <option key={d.deviceId} value={d.deviceId}>
+                  {d.label || `Camera ${i + 1}`}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      ) : (
+        <button className="secondary" onClick={() => void askAccess()}>
+          Choose microphone and camera
+        </button>
+      )}
+      <p className="hint">Used for calls. During a video call, Switch camera moves to the next camera, front or back on a phone.</p>
+      {error && <p role="alert">{error}</p>}
+    </section>
   );
 }

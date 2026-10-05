@@ -160,7 +160,7 @@ button:disabled {
   background: color-mix(in srgb, var(--red) 10%, transparent);
 }
 
-:where(input:not([type="checkbox"], [type="radio"], [type="file"])) {
+:where(input:not([type="checkbox"], [type="radio"], [type="file"]), select) {
   font: inherit;
   width: 100%;
   color: var(--fg);
@@ -169,7 +169,7 @@ button:disabled {
   border-radius: 12px;
   padding: 11px 12px;
 }
-:where(input):focus-visible {
+:where(input, select):focus-visible {
   outline: none;
   border-color: var(--dim);
 }
@@ -1015,14 +1015,19 @@ button.setting:active:not(:disabled) {
   object-fit: cover;
   display: block;
 }
+/* A fixed shape, filled whatever the camera's: without a height, Safari sizes the box before the
+   video's own size is known and the picture ends up smaller than its frame. */
 .video-grid video[data-testid="local-video"] {
   position: absolute;
   right: 10px;
   bottom: 10px;
   width: 96px;
+  height: auto;
+  aspect-ratio: 3 / 4;
   border-radius: 8px;
   border: 1px solid var(--line);
   object-fit: cover;
+  background: #000;
 }
 
 /* Something to check about a contact's keys: on top of everything except a call. */

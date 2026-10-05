@@ -2,6 +2,7 @@ import type { SignalStore } from "wasm-crypto";
 import type { LocalAccount } from "../storage/keyStore";
 import { fetchTurnServer } from "../api/turn";
 import { sendCallSignal, type CallEnvelope, type CallEndEnvelope } from "./conversation";
+import { openCallMedia } from "./mediaDevices";
 
 export type CallKind = "voice" | "video";
 export type CallEndReason = CallEndEnvelope["reason"];
@@ -26,6 +27,9 @@ function getIceServers(turn: RTCIceServer | null): RTCIceServer[] {
 }
 
 const ANSWER_TIMEOUT_MS = 30000;
+// Once answered, a call that finds no network path between the two devices can sit in
+// "connecting" forever (ICE does not always reach "failed"): give up and say so on both sides.
+const CONNECT_TIMEOUT_MS = 20000;
 const IDLE_RESET_MS = 3000;
 
 let state: CallState = { status: "idle" };
@@ -36,7 +40,9 @@ let pendingIceCandidates: RTCIceCandidateInit[] = [];
 // to setRemoteDescription's own completion isn't guaranteed) - buffered here,
 // independent of CallState, so an early track is never silently dropped.
 let remoteStreamBuffer: MediaStream | null = null;
-let answerTimer: number | undefined;
+// Ends a call that is not connected in time: first while ringing, then while connecting.
+let setupTimer: number | undefined;
+let failCurrentCall: (() => void) | undefined;
 let idleResetTimer: number | undefined;
 const listeners = new Set<(s: CallState) => void>();
 
@@ -59,8 +65,9 @@ export function subscribeToCallState(listener: (s: CallState) => void): () => vo
 }
 
 function cleanup(): void {
-  window.clearTimeout(answerTimer);
-  answerTimer = undefined;
+  window.clearTimeout(setupTimer);
+  setupTimer = undefined;
+  failCurrentCall = undefined;
   pc?.close();
   pc = null;
   pendingOffer = null;
@@ -69,6 +76,18 @@ function cleanup(): void {
   // Releasing the camera/mic is not optional - leaving it on after a call ends
   // is a real privacy bug in an app built specifically to resist surveillance.
   if ("localStream" in state) for (const track of state.localStream.getTracks()) track.stop();
+}
+
+function giveUpIfNotConnected(): void {
+  window.clearTimeout(setupTimer);
+  setupTimer = window.setTimeout(() => failCurrentCall?.(), CONNECT_TIMEOUT_MS);
+}
+
+/** "host udp 100.79.240.77" out of a candidate line, for the console. */
+function describeCandidate(candidate: RTCIceCandidateInit): string {
+  const parts = (candidate.candidate ?? "").split(" ");
+  const type = parts[parts.indexOf("typ") + 1];
+  return parts.length > 7 ? `${type} ${parts[2]?.toLowerCase()} ${parts[4]}` : "end of candidates";
 }
 
 function scheduleIdleReset(): void {
@@ -85,10 +104,17 @@ async function endCall(contactId: string, reason: CallEndReason, callId: string,
 
 function newPeerConnection(contactId: string, callId: string, kind: CallKind, account: LocalAccount, store: SignalStore, turn: RTCIceServer | null): RTCPeerConnection {
   const conn = new RTCPeerConnection({ iceServers: getIceServers(turn) });
+  failCurrentCall = () => void endCall(contactId, "failed", callId, account, store);
+  // Only in this device's console: which addresses each side offers, and where the connection stops.
+  console.info(`[call] ICE servers: ${conn.getConfiguration().iceServers?.length ? "relay configured" : "none (direct paths only)"}`);
+  conn.oniceconnectionstatechange = () => console.info(`[call] ICE ${conn.iceConnectionState}`);
 
   conn.onicecandidate = (e) => {
     if (pc !== conn) return; // stale connection, already replaced/closed
-    if (e.candidate) void sendCallSignal(contactId, { type: "call-ice", callId, candidate: e.candidate.toJSON() }, account, store);
+    if (e.candidate) {
+      console.info(`[call] local candidate: ${describeCandidate(e.candidate)}`);
+      void sendCallSignal(contactId, { type: "call-ice", callId, candidate: e.candidate.toJSON() }, account, store);
+    }
   };
 
   conn.ontrack = (e) => {
@@ -100,9 +126,10 @@ function newPeerConnection(contactId: string, callId: string, kind: CallKind, ac
   };
 
   conn.onconnectionstatechange = () => {
+    console.info(`[call] connection ${conn.connectionState}`);
     if (pc !== conn) return;
     if (conn.connectionState === "connected" && state.status === "connecting") {
-      window.clearTimeout(answerTimer);
+      window.clearTimeout(setupTimer);
       setState({ status: "connected", callId, kind, localStream: state.localStream, remoteStream: state.remoteStream, contactId });
     } else if (conn.connectionState === "failed") {
       void endCall(contactId, "failed", callId, account, store);
@@ -117,7 +144,7 @@ export async function startCall(contactId: string, kind: CallKind, account: Loca
   const callId = crypto.randomUUID();
   let localStream: MediaStream;
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === "video" });
+    localStream = await openCallMedia(kind === "video");
   } catch {
     // No offer was ever sent, so the other side has nothing to be told about -
     // just show "Call failed" locally instead of leaving the button looking
@@ -136,7 +163,7 @@ export async function startCall(contactId: string, kind: CallKind, account: Loca
   await sendCallSignal(contactId, { type: "call-offer", callId, kind, sdp: offer.sdp ?? "" }, account, store);
 
   setState({ status: "outgoing-ringing", callId, kind, localStream, contactId });
-  answerTimer = window.setTimeout(() => void endCall(contactId, "timeout", callId, account, store), ANSWER_TIMEOUT_MS);
+  setupTimer = window.setTimeout(() => void endCall(contactId, "timeout", callId, account, store), ANSWER_TIMEOUT_MS);
 }
 
 export async function acceptCall(contactId: string, account: LocalAccount, store: SignalStore): Promise<void> {
@@ -145,7 +172,7 @@ export async function acceptCall(contactId: string, account: LocalAccount, store
 
   let localStream: MediaStream;
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: kind === "video" });
+    localStream = await openCallMedia(kind === "video");
   } catch {
     // The caller already has an offer out and is sitting there ringing - tell
     // them it failed instead of letting them wait out the full answer timeout
@@ -167,6 +194,41 @@ export async function acceptCall(contactId: string, account: LocalAccount, store
 
   pendingOffer = null;
   setState({ status: "connecting", callId, kind, localStream, remoteStream: remoteStreamBuffer, contactId });
+  giveUpIfNotConnected();
+}
+
+/**
+ * Moves a video call to the next camera (front and back on a phone). The new picture replaces
+ * the old one on the same connection, so nothing is renegotiated with the other side.
+ */
+export async function switchCamera(): Promise<void> {
+  if (state.status !== "outgoing-ringing" && state.status !== "connecting" && state.status !== "connected") return;
+  if (state.kind !== "video" || !pc) return;
+  const conn = pc;
+  const current = state.localStream.getVideoTracks()[0];
+  const cameras = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+  if (cameras.length < 2) return;
+  const index = cameras.findIndex((c) => c.deviceId === current?.getSettings().deviceId);
+  const sender = conn.getSenders().find((s) => s.track?.kind === "video");
+  // A phone cannot open two cameras at once: the current one is released first.
+  current?.stop();
+  let track: MediaStreamTrack;
+  try {
+    track = await openCamera(cameras[(index + 1) % cameras.length].deviceId);
+  } catch {
+    // That camera refused: back to the one in use, rather than no picture at all.
+    track = await openCamera(cameras[Math.max(index, 0)].deviceId);
+  }
+  if (pc !== conn || !("localStream" in state)) {
+    track.stop(); // the call ended meanwhile
+    return;
+  }
+  await sender?.replaceTrack(track);
+  setState({ ...state, localStream: new MediaStream([...state.localStream.getAudioTracks(), track]) });
+}
+
+async function openCamera(deviceId: string): Promise<MediaStreamTrack> {
+  return (await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId } } })).getVideoTracks()[0];
 }
 
 export async function declineCall(contactId: string, account: LocalAccount, store: SignalStore): Promise<void> {
@@ -201,7 +263,7 @@ export async function handleCallSignal(envelope: CallEnvelope, senderAccountId: 
 
   if (envelope.type === "call-answer") {
     if (state.status !== "outgoing-ringing" || state.callId !== envelope.callId || !pc) return;
-    window.clearTimeout(answerTimer);
+    giveUpIfNotConnected();
     const { callId, kind, localStream, contactId } = state;
     await pc.setRemoteDescription({ type: "answer", sdp: envelope.sdp });
     for (const candidate of pendingIceCandidates) await pc.addIceCandidate(candidate);
@@ -213,6 +275,7 @@ export async function handleCallSignal(envelope: CallEnvelope, senderAccountId: 
   if (envelope.type === "call-ice") {
     const activeCallId = pendingOffer?.callId ?? (state.status !== "idle" && state.status !== "ended" ? state.callId : undefined);
     if (activeCallId !== envelope.callId) return;
+    console.info(`[call] remote candidate: ${describeCandidate(envelope.candidate)}`);
     // remoteDescription isn't set yet on the callee's side until acceptCall runs -
     // addIceCandidate throws if called first, so queue until then.
     if (pc?.remoteDescription) await pc.addIceCandidate(envelope.candidate);

@@ -1,0 +1,73 @@
+name: umbrachat
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: umbrachat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: umbrachat
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U umbrachat -d umbrachat"]
+      interval: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: deploy/server.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://umbrachat:${POSTGRES_PASSWORD}@db:5432/umbrachat
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:?set VAPID_PRIVATE_KEY in .env}
+      MESSAGE_TTL_DAYS: ${MESSAGE_TTL_DAYS:-30}
+      TURN_URLS: ${TURN_URLS:-}
+      TURN_SECRET: ${TURN_SECRET:-}
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+      args:
+        VITE_STUN_URL: ${VITE_STUN_URL:-}
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-http://localhost}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Optional call relay: docker compose --profile relay up -d
+  coturn:
+    profiles: [relay]
+    image: coturn/coturn
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_REALM: ${TURN_REALM:-}
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-}
+    volumes:
+      - ./deploy/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        [ -n "$$TURN_SECRET" ] && [ -n "$$TURN_REALM" ] && [ -n "$$TURN_EXTERNAL_IP" ] || { echo "set TURN_SECRET, TURN_REALM and TURN_EXTERNAL_IP in .env" >&2; exit 1; }
+        exec turnserver -c /etc/coturn/turnserver.conf --static-auth-secret="$$TURN_SECRET" --realm="$$TURN_REALM" --external-ip="$$TURN_EXTERNAL_IP"
+
+volumes:
+  db:
+  caddy_data:
+  caddy_config:

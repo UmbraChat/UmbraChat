@@ -1,0 +1,21 @@
+# SITE_ADDRESS is a domain (Caddy obtains a TLS certificate for it automatically)
+# or `http://localhost` for a local trial (plain HTTP is a secure context on localhost). No access log is configured on purpose: client IPs are not kept.
+{$SITE_ADDRESS:http://localhost} {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+	}
+
+	handle /v1/* {
+		reverse_proxy server:3000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

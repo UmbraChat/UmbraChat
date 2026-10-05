@@ -2,3 +2,5 @@
 /wasm-crypto/target/
 /wasm-crypto/pkg/
 /wasm-crypto/pkg-node-smoketest/
+
+.env

@@ -1,0 +1,64 @@
+# Builds the static client from a version tag, signs it (a GitHub build-provenance attestation
+# ties the archive to this repository, this workflow and this commit; nothing secret to keep),
+# and publishes it as a release. Pushing the tag is the only trigger.
+#
+# The page deployment at the bottom is OFF unless the repository variable PUBLISH_PAGE is "true"
+# (Settings, Secrets and variables, Actions, Variables). See README, "Releases and the web page".
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the attestation
+      attestations: write # store it
+    steps:
+      # Actions are pinned to a commit, not a tag: a moved tag cannot change what runs here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The client that asks for its server at first launch, built exactly like the README's local build.
+      - name: Build the client
+        run: docker build -f deploy/web.Dockerfile --target client-files --build-arg VITE_REQUIRE_SERVER_URL=1 --output client .
+
+      # Fixed order, owner, time and gzip header: the same files give the same archive.
+      - name: Pack
+        run: |
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='UTC 2020-01-01' -cf - -C client . | gzip -n > "umbrachat-client-${GITHUB_REF_NAME}.tar.gz"
+          sha256sum umbrachat-client-*.tar.gz > SHA256SUMS
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: umbrachat-client-*.tar.gz
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" umbrachat-client-*.tar.gz SHA256SUMS --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+
+      - if: vars.PUBLISH_PAGE == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: client
+
+  page:
+    needs: build
+    if: vars.PUBLISH_PAGE == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

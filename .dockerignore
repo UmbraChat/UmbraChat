@@ -1,0 +1,8 @@
+.git
+**/target
+**/node_modules
+**/dist
+wasm-crypto/pkg
+wasm-crypto/pkg-node-smoketest
+aidd_docs
+.env

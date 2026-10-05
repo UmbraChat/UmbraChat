@@ -61,7 +61,8 @@ export async function saveMessages(contactId: string, messages: ChatMessage[]): 
 // and an interleaved pair silently drops one of the two changes.
 const chains = new Map<string, Promise<unknown>>();
 
-type MessagesListener = (id: string, messages: ChatMessage[]) => void;
+/** `messages` is null when the bucket was deleted. */
+type MessagesListener = (id: string, messages: ChatMessage[] | null) => void;
 const listeners = new Set<MessagesListener>();
 
 /** Called after every write through updateMessages, which every history change goes through. */
@@ -84,6 +85,24 @@ export function updateMessages(id: string, change: (messages: ChatMessage[]) => 
     await saveMessages(id, next);
     for (const listener of listeners) listener(id, next);
     return next;
+  });
+  const tail = run.catch(() => {});
+  chains.set(id, tail);
+  void tail.then(() => chains.get(id) === tail && chains.delete(id));
+  return run;
+}
+
+/** Deletes a whole bucket, after any write already queued on it. A message stored later starts a new one. */
+export function deleteMessages(id: string): Promise<void> {
+  const run = (chains.get(id) ?? Promise.resolve()).then(async () => {
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).delete(id);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    for (const listener of listeners) listener(id, null);
   });
   const tail = run.catch(() => {});
   chains.set(id, tail);

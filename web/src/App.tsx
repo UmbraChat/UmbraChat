@@ -4,7 +4,7 @@ import { generateIdentity, computeSafetyNumber } from "./crypto/identity";
 import { loadAccount, saveAccount, type LocalAccount } from "./storage/keyStore";
 import { importBackup } from "./crypto/backup";
 import { isEncryptionEnabled, isKeyUnlockEnabled, isVaultActive, unlock, unlockWithKey } from "./crypto/vault";
-import { loadMessages, type ChatMessage } from "./storage/messageStore";
+import { deleteMessages, loadMessages, updateMessages, type ChatMessage } from "./storage/messageStore";
 import { registerAccount } from "./api/register";
 import { completeLink } from "./api/devices";
 import { fetchDeviceActive } from "./api/chain";
@@ -376,6 +376,8 @@ function App() {
     try {
       if (invite) await acceptInvite(invite, state.account);
       await enterConversation(state.account, contactId, "fwd");
+      // An empty history keeps the new chat in the list until the first message.
+      await updateMessages(contactId, (messages) => (messages.length ? false : messages));
       return true;
     } catch (err) {
       setListError(err instanceof Error ? err.message : "failed to start conversation");
@@ -389,6 +391,14 @@ function App() {
     if (state.status !== "ready" || entry.id === openId) return;
     const opening = entry.kind === "group" ? enterGroup(state.account, entry.id, "fwd") : enterConversation(state.account, entry.id, "fwd");
     opening.catch((err) => showToast(err instanceof Error ? err.message : "could not open this chat"));
+  }
+
+  // Only this device's copy: the contact keeps theirs, and the session stays so they can still write.
+  async function handleDeleteChat(contactId: string) {
+    if (state.status !== "ready") return;
+    await enterHome(state.account, "back").catch(onPollError);
+    await deleteMessages(contactId);
+    showToast("Chat deleted");
   }
 
   function handleBackToMenu() {
@@ -572,6 +582,7 @@ function App() {
         onBack={handleBackToMenu}
         onLoadFingerprints={() => contactSafetyNumbers(contactId, state.account, store)}
         onNicknameChange={refreshNicknames}
+        onDelete={() => void handleDeleteChat(contactId).catch((err) => showToast(err instanceof Error ? err.message : "could not delete this chat"))}
         sending={sending}
         fileStage={fileStage}
         callActive={callState.status !== "idle" && callState.status !== "ended"}

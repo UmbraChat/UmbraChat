@@ -52,6 +52,14 @@ export function useChatList(accountId: string | undefined, groups: Group[], open
     if (!accountId) return;
     let live = true;
     const off = onMessagesChanged((id, messages) => {
+      if (!messages) {
+        setSummaries((prev) => {
+          const next = new Map(prev);
+          next.delete(id);
+          return next;
+        });
+        return;
+      }
       setSummaries((prev) => new Map(prev).set(id, summarize(messages)));
       // Only received group messages carry a sender id.
       const last = messages.at(-1);
@@ -115,7 +123,8 @@ export function useChatList(accountId: string | undefined, groups: Group[], open
         unread: unreadGroups.has(group.id) && group.id !== openId,
       });
     }
-    return list.sort((a, b) => (b.at ?? "").localeCompare(a.at ?? ""));
+    // A chat with no message yet was just added and waits for a first word: on top.
+    return list.sort((a, b) => (b.at ?? "\uffff").localeCompare(a.at ?? "\uffff"));
   }, [summaries, nicknames, groups, unreadGroups, openId]);
 
   return { entries, refreshNicknames };

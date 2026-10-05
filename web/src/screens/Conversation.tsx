@@ -20,6 +20,8 @@ interface ConversationProps {
   onBack: () => void;
   onLoadFingerprints: () => Promise<DeviceFingerprint[]>;
   onNicknameChange: () => void;
+  /** Deletes this device's copy of the chat and leaves it. */
+  onDelete: () => void;
   sending: boolean;
   fileStage?: FileSendStage;
   callActive: boolean;
@@ -147,6 +149,7 @@ export function Conversation({
   onBack,
   onLoadFingerprints,
   onNicknameChange,
+  onDelete,
   sending,
   fileStage,
   callActive,
@@ -160,6 +163,7 @@ export function Conversation({
   const [fileSheet, setFileSheet] = useState(false);
   const [fileError, setFileError] = useState<string>();
   const [destructMode, setDestructMode] = useState("none");
+  const [confirmDelete, setConfirmDelete] = useState(false);
   // Messages already there when the conversation opened stay still; only new ones land.
   const initialIds = useRef<Set<string>>(null);
   if (initialIds.current === null) initialIds.current = new Set(messages.map((m) => m.id));
@@ -299,8 +303,31 @@ export function Conversation({
                 ›
               </span>
             </button>
+            <button className="setting danger-text" onClick={() => setConfirmDelete(true)}>
+              <span>
+                Delete chat
+                <small>Removes the messages from this device only</small>
+              </span>
+            </button>
           </div>
         </div>
+        <Sheet open={confirmDelete} onClose={() => setConfirmDelete(false)} label="Delete chat">
+          <h2 className="title">Delete this chat?</h2>
+          <p className="hint">Every message in it is removed from this device, files included. Your contact keeps their copy and can still write to you.</p>
+          <button
+            className="danger"
+            onClick={() => {
+              // Closed first: an open modal leaves the next screen inert.
+              setConfirmDelete(false);
+              onDelete();
+            }}
+          >
+            Delete chat
+          </button>
+          <button className="secondary" onClick={() => setConfirmDelete(false)}>
+            Cancel
+          </button>
+        </Sheet>
       </main>
     );
   }

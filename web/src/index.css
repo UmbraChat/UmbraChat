@@ -808,6 +808,10 @@ button.setting:active:not(:disabled) {
   transform: none;
   background: var(--surface-2);
 }
+.setting.danger-text,
+.setting.danger-text small {
+  color: var(--red);
+}
 .setting.stacked {
   display: grid;
   justify-content: stretch;

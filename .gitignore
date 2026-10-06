@@ -4,3 +4,6 @@
 /wasm-crypto/pkg-node-smoketest/
 
 .env
+
+# Personal notes for Claude Code: kept local, never published
+CLAUDE.md
